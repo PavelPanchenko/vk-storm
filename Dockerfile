@@ -46,6 +46,10 @@ COPY --from=builder --chown=next:nodejs /app/drizzle.config.ts ./drizzle.config.
 COPY --from=migrator --chown=next:nodejs /migrator/node_modules ./migrate/node_modules
 COPY --from=migrator --chown=next:nodejs /migrator/package.json ./migrate/package.json
 
+# drizzle.config.ts lives in /app so Node resolves `drizzle-kit` against
+# /app/node_modules. Expose the sidecar install there via a symlink.
+RUN ln -s /app/migrate/node_modules/drizzle-kit /app/node_modules/drizzle-kit
+
 USER next
 
 EXPOSE 3000
