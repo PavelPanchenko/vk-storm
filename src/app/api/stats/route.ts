@@ -1,23 +1,17 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
-import { POSTS_DIR } from "@/lib/config";
 import { requireSession } from "@/lib/api-auth";
 import { readGroups } from "@/lib/groups";
 import { readLogs } from "@/lib/logger";
 import { db } from "@/lib/db";
-import { publishResults } from "@/lib/db/schema";
-import { eq, sql } from "drizzle-orm";
+import { posts, publishResults } from "@/lib/db/schema";
+import { sql } from "drizzle-orm";
 
 export async function GET() {
   const result = await requireSession();
   if (result.error) return result.error;
 
-  let totalPosts = 0;
-  try {
-    if (fs.existsSync(POSTS_DIR)) {
-      totalPosts = fs.readdirSync(POSTS_DIR).filter(d => fs.statSync(`${POSTS_DIR}/${d}`).isDirectory()).length;
-    }
-  } catch {}
+  const [postCount] = await db.select({ count: sql<number>`count(*)` }).from(posts);
+  const totalPosts = Number(postCount?.count || 0);
 
   const groups = await readGroups();
   const totalGroups = groups.length;
