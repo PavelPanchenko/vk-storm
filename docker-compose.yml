@@ -35,26 +35,12 @@ services:
       NODE_ENV: production
     volumes:
       - uploads_data:/app/uploads
-    expose:
-      - "3000"
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
+    # Host nginx (the VPS already runs one for other projects) terminates TLS
+    # and reverse-proxies to this port. Bind to loopback so the app is not
+    # exposed on the public interface.
     ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      DOMAIN: ${DOMAIN}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - app
+      - "127.0.0.1:3000:3000"
 
 volumes:
   postgres_data:
   uploads_data:
-  caddy_data:
-  caddy_config:
