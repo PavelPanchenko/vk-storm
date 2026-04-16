@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { vkGroupPathKey, vkNumericGroupIdFromUrl } from "@/lib/vk-client";
 
 async function uploadFile(
   file: File,
@@ -608,17 +609,31 @@ export default function Home() {
     const publishResults: { postName: string; groupUrl: string; groupName?: string; success: boolean; error?: string }[] = [];
 
     try {
-      // 1. Batch check groups via JSONP (groups.getById supports comma-separated ids)
-      const screenNameToUrl = new Map(selectedUrls.map(u => [u.replace(/\/$/, "").split("/").pop()?.toLowerCase() || "", u]));
+      // 1. Batch check groups (groups.getById — comma-separated ids/short names).
+      // Сопоставление: по screen_name и по числовому id из club*/public* в URL — иначе
+      // при «красивом» адресе сообщества VK вернёт другой screen_name и все группы отфильтруются.
+      const screenNameToUrl = new Map(
+        selectedUrls.map((u) => [vkGroupPathKey(u), u] as const).filter(([k]) => k.length > 0),
+      );
+      const idToUrl = new Map<number, string>();
+      for (const u of selectedUrls) {
+        const nid = vkNumericGroupIdFromUrl(u);
+        if (nid != null) idToUrl.set(nid, u);
+      }
       const groupsResp = await vkApiFetch("groups.getById", { group_ids: Array.from(screenNameToUrl.keys()).join(","), fields: "can_post,can_suggest" });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const groupsList: any[] = (groupsResp as any).groups || (Array.isArray(groupsResp) ? groupsResp : []);
-      const validGroups = groupsList.map((g: Record<string, unknown>) => ({
-        id: Number(g.id),
-        name: (g.name || g.screen_name) as string,
-        url: screenNameToUrl.get(String(g.screen_name).toLowerCase()) || "",
-        can_post: Boolean(g.can_post),
-      })).filter(g => g.url);
+      const validGroups = groupsList.map((g: Record<string, unknown>) => {
+        const id = Number(g.id);
+        const sn = String(g.screen_name ?? "").toLowerCase();
+        const url = screenNameToUrl.get(sn) || idToUrl.get(id) || "";
+        return {
+          id,
+          name: (g.name || g.screen_name) as string,
+          url,
+          can_post: Boolean(g.can_post),
+        };
+      }).filter((g) => g.url);
 
       if (validGroups.length === 0) {
         progress.status = "Нет доступных групп"; progress.done = true;
