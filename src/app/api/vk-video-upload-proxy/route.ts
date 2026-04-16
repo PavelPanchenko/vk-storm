@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireSession } from "@/lib/api-auth";
-
-const VK_API_VERSION = "5.199";
+import { vkMethod } from "@/lib/vk-method";
 
 /**
  * Uploads a video to a VK group wall.
  * Flow: video.save (with group_id) -> POST file to returned upload_url -> returns owner_id/video_id.
  * Executed on the server so the token's IP matches the API caller's IP.
+ * Auto-refreshes token on Error 5 (IP-binding) via vkMethod().
  */
 export async function POST(request: NextRequest) {
   const auth = await requireSession();
@@ -22,31 +22,23 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    // 1) Get upload URL for this group
-    const saveForm = new URLSearchParams({
-      access_token: auth.session.access_token,
-      v: VK_API_VERSION,
+    const { data: saveData } = await vkMethod(auth.sessionId, auth.session, "video.save", {
       group_id: String(groupId),
       name: name.slice(0, 128),
       wallpost: "0",
     });
-    const saveResp = await fetch("https://api.vk.com/method/video.save", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: saveForm.toString(),
-    });
-    const saveData = await saveResp.json();
+
     if (saveData.error) {
       return NextResponse.json({ detail: `video.save: ${saveData.error.error_msg}`, code: saveData.error.error_code }, { status: 400 });
     }
-    const uploadUrl: string = saveData.response?.upload_url;
-    const ownerId: number = saveData.response?.owner_id;
-    const videoId: number = saveData.response?.video_id;
+    const resp = saveData.response as { upload_url?: string; owner_id?: number; video_id?: number } | undefined;
+    const uploadUrl = resp?.upload_url;
+    const ownerId = resp?.owner_id;
+    const videoId = resp?.video_id;
     if (!uploadUrl || !ownerId || !videoId) {
       return NextResponse.json({ detail: "Invalid video.save response" }, { status: 400 });
     }
 
-    // 2) Stream video file from our Blob to the VK upload URL
     const videoResp = await fetch(videoUrl);
     if (!videoResp.ok) {
       return NextResponse.json({ detail: `Не удалось загрузить видео из хранилища: ${videoResp.status}` }, { status: 400 });

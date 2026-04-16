@@ -94,6 +94,7 @@ export default function Home() {
   const [publishPost, setPublishPost] = useState("");
   const [publishGroups, setPublishGroups] = useState<Set<number>>(new Set());
   const [publishFilter, setPublishFilter] = useState<"all" | "new" | "sent">("all");
+  const [expandedPubCats, setExpandedPubCats] = useState<Set<string>>(new Set());
   const [postedGroupUrls, setPostedGroupUrls] = useState<Set<string>>(new Set());
   const [publishing, setPublishing] = useState(false);
   const [publishProgress, setPublishProgress] = useState({ progress: 0, status: "", done: false, success: 0, failed: 0, errors: [] as { group: string; error: string; url?: string }[] });
@@ -978,12 +979,20 @@ export default function Home() {
                     const cats = Array.from(new Set(filtered.map(g => g.category)));
                     return cats.length === 0 ? <p style={{color:"var(--text-muted)",fontSize:14}}>Нет групп по фильтру</p> : cats.map(cat => {
                       const catGroups = filtered.filter(g => g.category === cat);
+                      const expanded = expandedPubCats.has(cat);
+                      const selectedCount = catGroups.filter(g => publishGroups.has(g.idx)).length;
                       return (
-                        <div key={cat} style={{marginBottom:16}}>
-                          <div style={{fontSize:13,fontWeight:600,color:"var(--text-muted)",marginBottom:6,textTransform:"uppercase",letterSpacing:"0.5px"}}>{cat}</div>
-                          <div className="checkbox-grid">
-                            {catGroups.map(g => <label key={g.idx} className="checkbox-item"><input type="checkbox" checked={publishGroups.has(g.idx)} onChange={() => togglePubGroup(g.idx)}/><span>{g.name}</span><a href={g.url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{color:"var(--text-muted)",opacity:0.5,marginLeft:2,lineHeight:1}} title="Открыть в VK"><svg viewBox="0 0 24 24" width="11" height="11"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" fill="none" stroke="currentColor" strokeWidth="2"/><polyline points="15 3 21 3 21 9" fill="none" stroke="currentColor" strokeWidth="2"/><line x1="10" y1="14" x2="21" y2="3" stroke="currentColor" strokeWidth="2"/></svg></a></label>)}
-                          </div>
+                        <div key={cat} style={{marginBottom:12}}>
+                          <button type="button" onClick={() => setExpandedPubCats(prev => { const n = new Set(prev); if (n.has(cat)) n.delete(cat); else n.add(cat); return n; })} style={{display:"flex",alignItems:"center",gap:6,width:"100%",background:"transparent",border:"none",padding:"6px 0",cursor:"pointer",color:"var(--text-muted)",fontSize:13,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.5px",textAlign:"left"}}>
+                            <svg viewBox="0 0 24 24" width="14" height="14" style={{transform:expanded?"rotate(90deg)":"rotate(0)",transition:"transform 0.15s",flexShrink:0}}><polyline points="9 18 15 12 9 6" fill="none" stroke="currentColor" strokeWidth="2"/></svg>
+                            <span>{cat}</span>
+                            <span style={{opacity:0.7,fontWeight:500,textTransform:"none",letterSpacing:0}}>({selectedCount > 0 ? `${selectedCount}/${catGroups.length}` : catGroups.length})</span>
+                          </button>
+                          {expanded && (
+                            <div className="checkbox-grid">
+                              {catGroups.map(g => <label key={g.idx} className="checkbox-item"><input type="checkbox" checked={publishGroups.has(g.idx)} onChange={() => togglePubGroup(g.idx)}/><span>{g.name}</span><a href={g.url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{color:"var(--text-muted)",opacity:0.5,marginLeft:2,lineHeight:1}} title="Открыть в VK"><svg viewBox="0 0 24 24" width="11" height="11"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" fill="none" stroke="currentColor" strokeWidth="2"/><polyline points="15 3 21 3 21 9" fill="none" stroke="currentColor" strokeWidth="2"/><line x1="10" y1="14" x2="21" y2="3" stroke="currentColor" strokeWidth="2"/></svg></a></label>)}
+                            </div>
+                          )}
                         </div>
                       );
                     });
