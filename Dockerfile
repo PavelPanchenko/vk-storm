@@ -15,11 +15,14 @@ COPY . .
 RUN npm run build
 
 # Isolated stage for drizzle-kit (dev dep, not in Next.js standalone bundle).
+# drizzle-orm is a peer dep of drizzle-kit and must be installed alongside it
+# so migrate-time config loading can resolve it. Keep versions aligned with
+# package.json to avoid schema drift between build and migrate.
 FROM node:24-alpine AS migrator
 WORKDIR /migrator
 RUN npm init -y >/dev/null \
  && npm install --no-audit --no-fund --omit=optional \
-      drizzle-kit@0.31.10 dotenv@17.4.1
+      drizzle-kit@0.31.10 drizzle-orm@0.45.2 postgres@3.4.9
 
 FROM node:24-alpine AS runner
 WORKDIR /app
