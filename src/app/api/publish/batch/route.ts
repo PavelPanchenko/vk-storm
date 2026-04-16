@@ -4,6 +4,9 @@ import { vkMethod } from "@/lib/vk-method";
 
 export const maxDuration = 300;
 
+/** Параллельных wall.post. Три воркера часто упираются в Error 6 после JSONP/медиа на клиенте. */
+const BATCH_WALL_POST_CONCURRENCY = 2;
+
 type Group = { id: number; url: string; name: string };
 type BatchBody = { postText: string; attachments: string[]; groups: Group[] };
 
@@ -114,9 +117,8 @@ export async function POST(request: NextRequest) {
         }
       };
 
-      // Concurrency 3 matches VK's ~3 req/s user-token budget; vkMethod itself
-      // handles Error 6 / Error 10 backoff if we still hit the ceiling.
-      await Promise.all([worker(), worker(), worker()]);
+      // vkMethod backs off on Error 6 / 10; lower concurrency avoids bursts with client-side API calls.
+      await Promise.all(Array.from({ length: BATCH_WALL_POST_CONCURRENCY }, () => worker()));
 
       send({ type: "done", success, failed });
       request.signal.removeEventListener("abort", abort);
