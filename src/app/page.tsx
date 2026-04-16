@@ -603,77 +603,96 @@ export default function Home() {
         return;
       }
 
-      // 2. Publish to groups sequentially (VK rate limit: 3 req/sec)
+      // 2. Upload media ONCE to the user's wall; the resulting photo{owner_id}_{id}
+      //    and video{owner_id}_{id} attachments are valid in wall.post for ANY community.
       const hasImages = post.images && post.images.length > 0;
       const hasVideos = post.videos && post.videos.length > 0;
+      const sharedAttachments: string[] = [];
+      const mediaTotal = (hasImages ? post.images.length : 0) + (hasVideos ? post.videos.length : 0);
+      let mediaDone = 0;
+
+      progress.status = "Загрузка медиа...";
+      progress.progress = 0;
+      setPublishProgress({ ...progress });
+
+      if (hasImages) {
+        for (let i = 0; i < post.images.length; i++) {
+          if (publishCancelRef.current) break;
+          try {
+            const serverResp = await vkApiFetch("photos.getWallUploadServer", {});
+            const uploadUrl = (serverResp as Record<string, unknown>).upload_url as string;
+
+            const proxyResp = await apiFetch("/api/vk-upload-proxy", {
+              method: "POST",
+              body: JSON.stringify({ upload_url: uploadUrl, image_url: post.images[i] }),
+            });
+
+            if (!proxyResp.photo || proxyResp.photo === "[]") {
+              mediaDone++;
+              progress.progress = mediaTotal > 0 ? Math.round((mediaDone / mediaTotal) * 30) : 30;
+              setPublishProgress({ ...progress });
+              continue;
+            }
+
+            const saved = await vkApiFetch("photos.saveWallPhoto", {
+              server: String(proxyResp.server),
+              photo: proxyResp.photo,
+              hash: proxyResp.hash,
+            });
+            const savedArr = Array.isArray(saved) ? saved : ((saved as Record<string, unknown>).items as unknown[] || []);
+            if (savedArr.length > 0) {
+              const photo = savedArr[0] as Record<string, unknown>;
+              sharedAttachments.push(`photo${photo.owner_id}_${photo.id}`);
+            }
+          } catch (e) {
+            progress.errors.push({ group: "—", error: `Фото: ${(e as Error).message}` });
+          }
+          mediaDone++;
+          progress.progress = mediaTotal > 0 ? Math.round((mediaDone / mediaTotal) * 30) : 30;
+          setPublishProgress({ ...progress });
+          if (i < post.images.length - 1) await new Promise(r => setTimeout(r, 300));
+        }
+      }
+
+      if (hasVideos) {
+        for (let i = 0; i < post.videos.length; i++) {
+          if (publishCancelRef.current) break;
+          try {
+            const vp = await apiFetch("/api/vk-video-upload-proxy", {
+              method: "POST",
+              body: JSON.stringify({ video_url: post.videos[i], name: publishPost }),
+            });
+            if (vp.attachment) sharedAttachments.push(vp.attachment);
+          } catch (e) {
+            progress.errors.push({ group: "—", error: `Видео: ${(e as Error).message}` });
+          }
+          mediaDone++;
+          progress.progress = mediaTotal > 0 ? Math.round((mediaDone / mediaTotal) * 30) : 30;
+          setPublishProgress({ ...progress });
+        }
+      }
+
+      // Если пост задуман с медиа, но ни одно вложение не загрузилось — не публикуем текст молча.
+      if (mediaTotal > 0 && sharedAttachments.length === 0 && !publishCancelRef.current) {
+        progress.status = "Не удалось загрузить медиа — публикация отменена";
+        progress.done = true;
+        setPublishProgress({ ...progress });
+        setShowResults(true);
+        return;
+      }
+
+      // 3. Parallel wall.post across groups (concurrency=3 matches VK 3 req/s limit)
       const total = validGroups.length;
       let completed = 0;
+      progress.status = `Публикация (${completed}/${total})`;
+      progress.progress = 30;
+      setPublishProgress({ ...progress });
 
-      for (const g of validGroups) {
-        if (publishCancelRef.current) {
-          progress.status = "Отменено"; progress.done = true;
-          setPublishProgress({ ...progress }); break;
-        }
-        progress.status = (hasImages || hasVideos)
-          ? `Загрузка медиа и публикация (${completed + 1}/${total})`
-          : `Публикация (${completed + 1}/${total})`;
-        progress.progress = Math.round(10 + (completed / total) * 85);
-        setPublishProgress({ ...progress });
-
+      const publishOne = async (g: typeof validGroups[number]) => {
+        if (publishCancelRef.current) return;
         try {
-          try { await vkApiFetch("groups.join", { group_id: String(g.id) }); } catch {}
-          await new Promise(r => setTimeout(r, 400));
-
-          // Upload photos for this specific group
-          const attachments: string[] = [];
-          if (hasImages) {
-            for (let i = 0; i < post.images.length; i++) {
-              if (publishCancelRef.current) break;
-              const serverResp = await vkApiFetch("photos.getWallUploadServer", { group_id: String(g.id) });
-              const uploadUrl = (serverResp as Record<string, unknown>).upload_url as string;
-              await new Promise(r => setTimeout(r, 350));
-
-              const proxyResp = await apiFetch("/api/vk-upload-proxy", {
-                method: "POST",
-                body: JSON.stringify({ upload_url: uploadUrl, image_url: post.images[i] }),
-              });
-
-              if (!proxyResp.photo || proxyResp.photo === "[]") continue;
-
-              const saved = await vkApiFetch("photos.saveWallPhoto", {
-                group_id: String(g.id),
-                server: String(proxyResp.server),
-                photo: proxyResp.photo,
-                hash: proxyResp.hash,
-              });
-              const savedArr = Array.isArray(saved) ? saved : ((saved as Record<string, unknown>).items as unknown[] || []);
-              if (savedArr.length > 0) {
-                const photo = savedArr[0] as Record<string, unknown>;
-                attachments.push(`photo${photo.owner_id}_${photo.id}`);
-              }
-              if (i < post.images.length - 1) await new Promise(r => setTimeout(r, 400));
-            }
-          }
-
-          // Upload videos for this specific group
-          if (hasVideos) {
-            for (let i = 0; i < post.videos.length; i++) {
-              if (publishCancelRef.current) break;
-              try {
-                const vp = await apiFetch("/api/vk-video-upload-proxy", {
-                  method: "POST",
-                  body: JSON.stringify({ video_url: post.videos[i], group_id: g.id, name: publishPost }),
-                });
-                if (vp.attachment) attachments.push(vp.attachment);
-              } catch (e) {
-                progress.errors.push({ group: g.name, error: `Видео: ${(e as Error).message}`, url: g.url });
-              }
-              if (i < post.videos.length - 1) await new Promise(r => setTimeout(r, 500));
-            }
-          }
-
           const postParams: Record<string, string> = { owner_id: String(-g.id), message: post.text };
-          if (attachments.length > 0) postParams.attachments = attachments.join(",");
+          if (sharedAttachments.length > 0) postParams.attachments = sharedAttachments.join(",");
 
           try {
             await vkApiFetch("wall.post", postParams);
@@ -682,7 +701,9 @@ export default function Home() {
           } catch (e) {
             const errMsg = (e as Error).message || "";
             if (/Error (1051|15|214)/.test(errMsg)) {
-              await new Promise(r => setTimeout(r, 400));
+              // 3 параллельных воркера × retry могут упереться в VK 3 req/s — разносим джиттером
+              await new Promise(r => setTimeout(r, 400 + Math.random() * 400));
+              if (publishCancelRef.current) return;
               await vkApiFetch("wall.post", { ...postParams, suggest: "1" });
               progress.success++;
               publishResults.push({ postName: publishPost, groupUrl: g.url, groupName: g.name, success: true });
@@ -697,16 +718,34 @@ export default function Home() {
           publishResults.push({ postName: publishPost, groupUrl: g.url, groupName: g.name, success: false, error: errMsg });
         }
         completed++;
-        progress.progress = Math.round(10 + (completed / total) * 85);
+        progress.status = `Публикация (${completed}/${total})`;
+        progress.progress = Math.round(30 + (completed / total) * 70);
         setPublishProgress({ ...progress });
+      };
 
-        if (completed < total) await new Promise(r => setTimeout(r, 1000));
+      const queue = [...validGroups];
+      const worker = async () => {
+        while (queue.length > 0) {
+          if (publishCancelRef.current) return;
+          const g = queue.shift();
+          if (!g) return;
+          await publishOne(g);
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+
+      const cancelled = publishCancelRef.current;
+      if (cancelled) {
+        progress.status = "Отменено";
+      } else {
+        progress.progress = 100;
+        progress.status = "Готово!";
       }
+      progress.done = true;
+      setPublishProgress({ ...progress });
+      setShowResults(true);
 
-      // 4. Save results to DB
-      progress.progress = 100; progress.status = "Готово!"; progress.done = true;
-      setPublishProgress({ ...progress }); setShowResults(true);
-
+      // Сохраняем даже частичные результаты при отмене — юзеру полезно видеть, что успело уйти
       if (publishResults.length > 0) {
         try {
           await apiFetch("/api/publish/results", { method: "POST", body: JSON.stringify({ batchId, postText: post.text, results: publishResults }) });
