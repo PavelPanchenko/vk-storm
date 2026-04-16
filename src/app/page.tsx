@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { vkGroupPathKey, vkNumericGroupIdFromUrl } from "@/lib/vk-client";
+import { vkGroupPathKey, vkNumericGroupIdFromUrl } from "@/lib/vk-group-url";
 
 async function uploadFile(
   file: File,
