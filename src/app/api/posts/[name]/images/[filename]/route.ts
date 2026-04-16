@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { del } from "@vercel/blob";
 import { requireSession } from "@/lib/api-auth";
 import { getPost, updatePost } from "@/lib/posts";
+import { deleteUpload } from "@/lib/storage";
 
 type Params = { params: Promise<{ name: string; filename: string }> };
 
@@ -13,13 +13,11 @@ export async function GET(_request: NextRequest, { params }: Params) {
   if (!post) {
     return NextResponse.json({ detail: "Пост не найден" }, { status: 404 });
   }
-  // Find matching blob URL by filename
-  const blobUrl = post.images.find((url) => url.includes(encodeURIComponent(filename)) || url.includes(filename));
-  if (!blobUrl) {
+  const storedUrl = post.images.find((url) => url.includes(encodeURIComponent(filename)) || url.includes(filename));
+  if (!storedUrl) {
     return NextResponse.json({ detail: "Изображение не найдено" }, { status: 404 });
   }
-  // Redirect to Blob URL
-  return NextResponse.redirect(blobUrl);
+  return NextResponse.redirect(new URL(storedUrl, _request.url));
 }
 
 export async function DELETE(_request: NextRequest, { params }: Params) {
@@ -30,12 +28,12 @@ export async function DELETE(_request: NextRequest, { params }: Params) {
   if (!post) {
     return NextResponse.json({ detail: "Пост не найден" }, { status: 404 });
   }
-  const blobUrl = post.images.find((url) => url.includes(encodeURIComponent(filename)) || url.includes(filename));
-  if (!blobUrl) {
+  const storedUrl = post.images.find((url) => url.includes(encodeURIComponent(filename)) || url.includes(filename));
+  if (!storedUrl) {
     return NextResponse.json({ detail: "Изображение не найдено" }, { status: 404 });
   }
-  try { await del(blobUrl); } catch {}
-  const remaining = post.images.filter((url) => url !== blobUrl);
+  try { await deleteUpload(storedUrl); } catch {}
+  const remaining = post.images.filter((url) => url !== storedUrl);
   await updatePost(name, post.text, remaining, post.videos);
   return NextResponse.json({ status: "ok" });
 }

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { del } from "@vercel/blob";
 import { requireSession } from "@/lib/api-auth";
 import { getPost, updatePost, deletePost } from "@/lib/posts";
+import { deleteUpload } from "@/lib/storage";
 import { appendLog } from "@/lib/logger";
 
 type Params = { params: Promise<{ name: string }> };
@@ -37,11 +37,10 @@ export async function PUT(request: NextRequest, { params }: Params) {
   const imageUrls = Array.isArray(body.images) ? (body.images as unknown[]).filter((u): u is string => typeof u === "string") : [];
   const videoUrls = Array.isArray(body.videos) ? (body.videos as unknown[]).filter((u): u is string => typeof u === "string") : [];
 
-  // Delete removed blobs (images + videos that were stored in our blob bucket)
   const removedImages = post.images.filter((url) => !imageUrls.includes(url));
   const removedVideos = (post.videos || []).filter((url) => !videoUrls.includes(url));
   for (const url of [...removedImages, ...removedVideos]) {
-    try { await del(url); } catch {}
+    try { await deleteUpload(url); } catch {}
   }
 
   await updatePost(name, text, imageUrls, videoUrls);
@@ -58,7 +57,7 @@ export async function DELETE(_request: NextRequest, { params }: Params) {
   }
 
   for (const url of [...post.images, ...(post.videos || [])]) {
-    try { await del(url); } catch {}
+    try { await deleteUpload(url); } catch {}
   }
 
   await deletePost(name);

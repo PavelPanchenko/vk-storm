@@ -1,6 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { extname } from "node:path";
+import { Readable } from "node:stream";
 import { requireSession } from "@/lib/api-auth";
 import { vkMethod } from "@/lib/vk-method";
+import { resolveUploadPath } from "@/lib/storage";
+
+export const runtime = "nodejs";
+
+const VIDEO_MIME: Record<string, string> = {
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm",
+  ".mkv": "video/x-matroska",
+  ".mpeg": "video/mpeg",
+  ".mpg": "video/mpeg",
+  ".avi": "video/x-msvideo",
+};
 
 /**
  * Uploads a video to VK.
@@ -44,13 +61,30 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ detail: "Invalid video.save response" }, { status: 400 });
     }
 
-    const videoResp = await fetch(videoUrl);
-    if (!videoResp.ok || !videoResp.body) {
-      return NextResponse.json({ detail: `Не удалось загрузить видео из хранилища: ${videoResp.status}` }, { status: 400 });
+    let videoStream: ReadableStream<Uint8Array>;
+    let contentType: string;
+    let fileName: string;
+
+    if (videoUrl.startsWith("/uploads/")) {
+      const rel = videoUrl.slice("/uploads/".length);
+      const abs = resolveUploadPath(rel);
+      if (!abs) return NextResponse.json({ detail: "Invalid video path" }, { status: 400 });
+      const st = await stat(abs).catch(() => null);
+      if (!st || !st.isFile()) return NextResponse.json({ detail: "Video not found" }, { status: 404 });
+      const ext = extname(abs).toLowerCase();
+      contentType = VIDEO_MIME[ext] || "video/mp4";
+      fileName = `video${ext || ".mp4"}`;
+      videoStream = Readable.toWeb(createReadStream(abs)) as unknown as ReadableStream<Uint8Array>;
+    } else {
+      const videoResp = await fetch(videoUrl);
+      if (!videoResp.ok || !videoResp.body) {
+        return NextResponse.json({ detail: `Не удалось загрузить видео из хранилища: ${videoResp.status}` }, { status: 400 });
+      }
+      contentType = videoResp.headers.get("content-type") || "video/mp4";
+      const extFromUrl = (videoUrl.split("?")[0].split(".").pop() || "mp4").toLowerCase();
+      fileName = `video.${/^[a-z0-9]{2,5}$/.test(extFromUrl) ? extFromUrl : "mp4"}`;
+      videoStream = videoResp.body;
     }
-    const contentType = videoResp.headers.get("content-type") || "video/mp4";
-    const extFromUrl = (videoUrl.split("?")[0].split(".").pop() || "mp4").toLowerCase();
-    const fileName = `video.${/^[a-z0-9]{2,5}$/.test(extFromUrl) ? extFromUrl : "mp4"}`;
 
     // Manually construct a streaming multipart/form-data body so we never buffer the
     // full video in memory. undici (Node 24 global fetch) accepts a ReadableStream
@@ -61,12 +95,11 @@ export async function POST(request: NextRequest) {
       `--${boundary}\r\nContent-Disposition: form-data; name="video_file"; filename="${fileName}"\r\nContent-Type: ${contentType}\r\n\r\n`,
     );
     const epilogue = encoder.encode(`\r\n--${boundary}--\r\n`);
-    const videoBody = videoResp.body;
 
     const multipartStream = new ReadableStream<Uint8Array>({
       async start(controller) {
         controller.enqueue(preamble);
-        const reader = videoBody.getReader();
+        const reader = videoStream.getReader();
         try {
           while (true) {
             const { done, value } = await reader.read();
@@ -81,7 +114,7 @@ export async function POST(request: NextRequest) {
         controller.close();
       },
       cancel(reason) {
-        videoBody.cancel(reason).catch(() => {});
+        videoStream.cancel(reason).catch(() => {});
       },
     });
 

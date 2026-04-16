@@ -1,7 +1,37 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { upload } from "@vercel/blob/client";
+
+async function uploadFile(
+  file: File,
+  kind: "image" | "video",
+  onProgress: (pct: number) => void,
+): Promise<{ url: string }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText) as { url: string }); } catch { reject(new Error("Некорректный ответ сервера")); }
+      } else {
+        let msg = `HTTP ${xhr.status}`;
+        try {
+          const j = JSON.parse(xhr.responseText) as { error?: string; detail?: string };
+          msg = j.error || j.detail || msg;
+        } catch {}
+        reject(new Error(msg));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Ошибка сети при загрузке"));
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("kind", kind);
+    xhr.open("POST", "/api/blob/upload");
+    xhr.send(fd);
+  });
+}
 
 /* ===== TYPES ===== */
 interface User { user_id: string; name: string; avatar: string }
@@ -250,26 +280,19 @@ export default function Home() {
   }, [publishPost, apiFetch]);
 
   /* ===== POST CRUD ===== */
-  const uploadFilesToBlob = useCallback(async (files: File[], postSlug: string, kind: "image" | "video"): Promise<string[]> => {
+  const uploadFilesToBlob = useCallback(async (files: File[], _postSlug: string, kind: "image" | "video"): Promise<string[]> => {
     const urls: string[] = [];
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
       setUploadProgress({ name: f.name, pct: 0 });
       try {
-        const blob = await upload(`posts/${postSlug}/${kind}-${Date.now()}-${f.name}`, f, {
-          access: "public",
-          handleUploadUrl: "/api/blob/upload",
-          clientPayload: kind,
-          onUploadProgress: (p) => setUploadProgress({ name: f.name, pct: p.percentage }),
-          multipart: f.size > 10 * 1024 * 1024,
-        });
-        urls.push(blob.url);
+        const { url } = await uploadFile(f, kind, (pct) => setUploadProgress({ name: f.name, pct }));
+        urls.push(url);
       } catch (e) {
         setUploadProgress(null);
         const msg = (e as Error).message || String(e);
-        // Friendly messages for common failures
-        if (/size|too large|exceed/i.test(msg)) throw new Error(`Файл "${f.name}" слишком большой. Лимит: ${kind === "video" ? "500 MB" : "20 MB"}`);
-        if (/content.?type|allowed/i.test(msg)) throw new Error(`Неподдерживаемый тип файла: ${f.name}`);
+        if (/size|too large|exceed|слишком большой/i.test(msg)) throw new Error(`Файл "${f.name}" слишком большой. Лимит: ${kind === "video" ? "500 MB" : "20 MB"}`);
+        if (/content.?type|allowed|неподдерживаем/i.test(msg)) throw new Error(`Неподдерживаемый тип файла: ${f.name}`);
         throw new Error(`Ошибка загрузки "${f.name}": ${msg}`);
       }
     }

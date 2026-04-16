@@ -1,0 +1,10 @@
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:3000 {
+		# Disable response buffering so SSE (/api/publish/batch) streams flush immediately.
+		flush_interval -1
+	}
+	request_body {
+		max_size 600MB
+	}
+}
