@@ -681,58 +681,80 @@ export default function Home() {
         return;
       }
 
-      // 3. Parallel wall.post across groups (concurrency=3 matches VK 3 req/s limit)
+      // 3. Server-side fan-out of wall.post via SSE. Ключ: все wall.post
+      //    уходят с одного Lambda-инстанса = один egress IP, и IP-bound
+      //    токен не инвалидируется между запросами. Прогресс стримится
+      //    обратно событиями SSE.
       const total = validGroups.length;
-      let completed = 0;
-      progress.status = `Публикация (${completed}/${total})`;
+      progress.status = `Публикация (0/${total})`;
       progress.progress = 30;
       setPublishProgress({ ...progress });
 
-      const publishOne = async (g: typeof validGroups[number]) => {
-        if (publishCancelRef.current) return;
-        try {
-          const postParams: Record<string, string> = { owner_id: String(-g.id), message: post.text };
-          if (sharedAttachments.length > 0) postParams.attachments = sharedAttachments.join(",");
+      const abortCtrl = new AbortController();
+      const cancelWatcher = setInterval(() => {
+        if (publishCancelRef.current) abortCtrl.abort();
+      }, 200);
 
-          try {
-            await vkApiFetch("wall.post", postParams);
-            progress.success++;
-            publishResults.push({ postName: publishPost, groupUrl: g.url, groupName: g.name, success: true });
-          } catch (e) {
-            const errMsg = (e as Error).message || "";
-            if (/Error (1051|15|214)/.test(errMsg)) {
-              // 3 параллельных воркера × retry могут упереться в VK 3 req/s — разносим джиттером
-              await new Promise(r => setTimeout(r, 400 + Math.random() * 400));
-              if (publishCancelRef.current) return;
-              await vkApiFetch("wall.post", { ...postParams, suggest: "1" });
-              progress.success++;
-              publishResults.push({ postName: publishPost, groupUrl: g.url, groupName: g.name, success: true });
-            } else {
-              throw e;
+      try {
+        const resp = await fetch("/api/publish/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            postText: post.text,
+            attachments: sharedAttachments,
+            groups: validGroups.map(g => ({ id: g.id, url: g.url, name: g.name })),
+          }),
+          signal: abortCtrl.signal,
+        });
+
+        if (!resp.ok || !resp.body) {
+          const errText = await resp.text().catch(() => "");
+          throw new Error(`Batch publish failed: ${resp.status} ${errText}`.slice(0, 300));
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          let idx: number;
+          // SSE events separated by blank line
+          while ((idx = buffer.indexOf("\n\n")) !== -1) {
+            const chunk = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
+            if (!dataLine) continue;
+            try {
+              const event = JSON.parse(dataLine.slice(6));
+              if (event.type === "result") {
+                if (event.success) {
+                  progress.success++;
+                  publishResults.push({ postName: publishPost, groupUrl: event.group.url, groupName: event.group.name, success: true });
+                } else {
+                  progress.failed++;
+                  progress.errors.push({ group: event.group.name, error: event.error || "Неизвестная ошибка", url: event.group.url });
+                  publishResults.push({ postName: publishPost, groupUrl: event.group.url, groupName: event.group.name, success: false, error: event.error });
+                }
+                progress.status = `Публикация (${event.completed}/${event.total})`;
+                progress.progress = Math.round(30 + (event.completed / event.total) * 70);
+                setPublishProgress({ ...progress });
+              }
+            } catch {
+              // ignore malformed chunk
             }
           }
-        } catch (e) {
-          progress.failed++;
-          const errMsg = (e as Error).message || "Неизвестная ошибка";
-          progress.errors.push({ group: g.name, error: errMsg, url: g.url });
-          publishResults.push({ postName: publishPost, groupUrl: g.url, groupName: g.name, success: false, error: errMsg });
         }
-        completed++;
-        progress.status = `Публикация (${completed}/${total})`;
-        progress.progress = Math.round(30 + (completed / total) * 70);
-        setPublishProgress({ ...progress });
-      };
-
-      const queue = [...validGroups];
-      const worker = async () => {
-        while (queue.length > 0) {
-          if (publishCancelRef.current) return;
-          const g = queue.shift();
-          if (!g) return;
-          await publishOne(g);
+      } catch (e) {
+        if (!publishCancelRef.current) {
+          progress.errors.push({ group: "—", error: `Ошибка стрима: ${(e as Error).message}` });
         }
-      };
-      await Promise.all([worker(), worker(), worker()]);
+      } finally {
+        clearInterval(cancelWatcher);
+      }
 
       const cancelled = publishCancelRef.current;
       if (cancelled) {
