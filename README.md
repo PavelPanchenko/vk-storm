@@ -1,36 +1,93 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# VKStorm
 
-## Getting Started
+Массовый постинг в VK-сообщества через VK ID OAuth: загрузка фото и видео, прямые посты и предложка, журнал и история публикаций.
 
-First, run the development server:
+Стек: Next.js 16 (App Router, React 19), Drizzle ORM + Postgres, Node 24.
+
+## Почему нужен VPS со стабильным IP
+
+VK выдаёт пользовательские access-токены, жёстко привязанные к IP-адресу выдачи. На Vercel (Fluid Compute) трафик идёт через NAT-пул с несколькими egress-IP, из-за чего VK периодически отдаёт `Error 5: access_token was given to another IP address` и требует перевыпуска токена. На VPS исходящий IP один и стабильный — проблема уходит.
+
+Пользовательские медиафайлы тоже хранятся локально (volume `uploads_data`), а не во внешнем блоб-сторадже.
+
+## Требования
+
+- VPS с установленными Docker и Docker Compose
+- Доменное имя с A-записью на IP сервера (для автоматических TLS-сертификатов через Caddy)
+- Приложение, зарегистрированное в [id.vk.com](https://id.vk.com) (нужны `VK_APP_ID` и `VK_APP_SECRET`; в настройках приложения укажите `Redirect URI = https://ВАШ_ДОМЕН/api/auth/callback`)
+
+## Развёртывание
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+git clone <url> /opt/vkstorm
+cd /opt/vkstorm
+cp .env.example .env
+# заполните POSTGRES_PASSWORD, VK_APP_ID, VK_APP_SECRET, VK_REDIRECT_URI, DOMAIN
+docker compose up -d --build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Caddy автоматически получит сертификат Let's Encrypt для `$DOMAIN`. Откройте `https://$DOMAIN`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Миграции Drizzle применяются автоматически при старте контейнера `app`. Если нужно прогнать руками:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+docker compose exec app ./migrate/node_modules/.bin/drizzle-kit migrate
+```
 
-## Learn More
+## Обновление
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+cd /opt/vkstorm
+git pull
+docker compose up -d --build
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Логи и мониторинг
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+docker compose logs -f app      # приложение
+docker compose logs -f caddy    # прокси и TLS
+docker compose logs -f postgres # база
+```
 
-## Deploy on Vercel
+## Бэкапы
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Данные живут в именованных volume `vkstorm_postgres_data` и `vkstorm_uploads_data` (префикс зависит от имени каталога, в котором запущен compose).
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+# Postgres
+docker compose exec -T postgres pg_dump -U vkstorm vkstorm | gzip > vkstorm-$(date +%F).sql.gz
+
+# Загруженные медиа
+docker run --rm -v vkstorm_uploads_data:/src -v "$PWD":/dst alpine \
+  tar czf /dst/uploads-$(date +%F).tar.gz -C /src .
+```
+
+Восстановление:
+
+```bash
+gunzip -c vkstorm-YYYY-MM-DD.sql.gz | docker compose exec -T postgres psql -U vkstorm vkstorm
+docker run --rm -v vkstorm_uploads_data:/dst -v "$PWD":/src alpine \
+  sh -c "cd /dst && tar xzf /src/uploads-YYYY-MM-DD.tar.gz"
+```
+
+## Локальная разработка
+
+```bash
+cp .env.example .env.local
+# заполните DATABASE_URL (например, postgresql://postgres:postgres@localhost:5432/vkstorm),
+# VK_APP_ID, VK_APP_SECRET, VK_REDIRECT_URI=http://localhost:3000/api/auth/callback,
+# NEXT_PUBLIC_VK_APP_ID, NEXT_PUBLIC_VK_REDIRECT_URI (те же значения)
+npm install
+npm run db:migrate
+npm run dev
+```
+
+Загруженные файлы сохраняются в `./uploads` (настраивается через `UPLOADS_DIR`).
+
+## Структура
+
+- `src/app/` — App Router страницы и API-роуты
+- `src/lib/` — общие модули (`auth`, `vk-method`, `storage`, `posts`, `groups`, ...)
+- `drizzle/` — сгенерированные SQL-миграции
+- `Dockerfile`, `docker-compose.yml`, `Caddyfile` — инфраструктура
