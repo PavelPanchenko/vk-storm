@@ -10,12 +10,12 @@ export async function DELETE(_request: NextRequest, { params }: Params) {
   if (result.error) return result.error;
   const { index: indexStr } = await params;
   const index = parseInt(indexStr, 10);
-  const rows = await readGroupRows();
+  const rows = await readGroupRows(result.session.user_id);
   if (index < 0 || index >= rows.length) {
     return NextResponse.json({ detail: "Группа не найдена" }, { status: 404 });
   }
   const removed = rows[index];
-  await removeGroup(removed.url);
+  await removeGroup(result.session.user_id, removed.url);
   await appendLog("INFO", `Group removed: ${removed.url}`);
   return NextResponse.json({ status: "ok" });
 }
@@ -25,13 +25,13 @@ export async function PATCH(request: NextRequest, { params }: Params) {
   if (result.error) return result.error;
   const { index: indexStr } = await params;
   const index = parseInt(indexStr, 10);
-  const rows = await readGroupRows();
+  const rows = await readGroupRows(result.session.user_id);
   if (index < 0 || index >= rows.length) {
     return NextResponse.json({ detail: "Группа не найдена" }, { status: 404 });
   }
   const body = await request.json();
   const category = (body.category || "").trim();
   if (!category) return NextResponse.json({ detail: "Категория обязательна" }, { status: 400 });
-  await updateGroupCategory(rows[index].url, category);
+  await updateGroupCategory(result.session.user_id, rows[index].url, category);
   return NextResponse.json({ status: "ok" });
 }

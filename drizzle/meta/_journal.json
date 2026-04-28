@@ -36,6 +36,13 @@
       "when": 1776360496213,
       "tag": "0004_add_videos_and_device_id",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1777401000000,
+      "tag": "0005_user_scoped_data",
+      "breakpoints": true
     }
   ]
 }

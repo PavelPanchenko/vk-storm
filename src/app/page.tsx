@@ -131,6 +131,9 @@ export default function Home() {
   const [publishProgress, setPublishProgress] = useState({ progress: 0, status: "", done: false, success: 0, failed: 0, errors: [] as { group: string; error: string; url?: string }[] });
   const [showProgress, setShowProgress] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  const [showSubscribeAllPrompt, setShowSubscribeAllPrompt] = useState(false);
+  const [subscribePromptSeenKey, setSubscribePromptSeenKey] = useState("");
+  const [joiningCommunities, setJoiningCommunities] = useState(false);
 
   // History
   const [history, setHistory] = useState<HistoryBatch[]>([]);
@@ -569,6 +572,17 @@ export default function Home() {
   };
 
   /* ===== PUBLISH ===== */
+  const isNotSubscribedPublishError = useCallback((error: string) => {
+    return /не подписан|not subscribed|not a member|isMember/i.test(error);
+  }, []);
+  const getNotSubscribedCommunityUrls = useCallback(() => {
+    return Array.from(new Set(
+      publishProgress.errors
+        .filter(e => e.url && isNotSubscribedPublishError(e.error))
+        .map(e => e.url as string),
+    ));
+  }, [publishProgress.errors, isNotSubscribedPublishError]);
+
   const togglePubGroup = (idx: number) => {
     setPublishGroups(prev => { const n = new Set(prev); if (n.has(idx)) n.delete(idx); else n.add(idx); return n; });
   };
@@ -823,6 +837,16 @@ export default function Home() {
   const openConfirmDialog = (title: string, message: string, onConfirm: () => void) => {
     setConfirmData({ title, message, onConfirm }); setShowConfirm(true);
   };
+
+  useEffect(() => {
+    if (!showResults || publishing) return;
+    const urls = getNotSubscribedCommunityUrls();
+    if (urls.length === 0) return;
+    const key = urls.slice().sort().join("|");
+    if (!key || key === subscribePromptSeenKey) return;
+    setSubscribePromptSeenKey(key);
+    setShowSubscribeAllPrompt(true);
+  }, [showResults, publishing, getNotSubscribedCommunityUrls, subscribePromptSeenKey]);
 
   /* ===== RENDER ===== */
   if (!authChecked) return null;
@@ -1117,7 +1141,7 @@ export default function Home() {
                   <div className="result-badge failed">Ошибки: {publishProgress.failed}</div>
                 </div>
                 {publishProgress.errors.length>0 && <div className="error-list">
-                  {publishProgress.errors.map((e,i) => <div key={i} className="error-card"><div className="error-card-group">{e.url ? <a href={e.url} target="_blank" rel="noopener noreferrer" style={{color:"inherit"}}>{e.group} ↗</a> : e.group}</div><div className="error-card-msg">{e.error}</div></div>)}
+                  {publishProgress.errors.map((e,i) => <div key={i} className="error-card"><div className="error-card-group">{e.url ? <a href={e.url} target="_blank" rel="noopener noreferrer" style={{color:"inherit"}}>{e.group} ↗</a> : e.group}</div><div className="error-card-msg">{e.error}</div>{e.url && isNotSubscribedPublishError(e.error) && <div style={{marginTop:8}}><a className="btn btn-secondary btn-sm" href={e.url} target="_blank" rel="noopener noreferrer">Подписаться</a></div>}</div>)}
                   <button className="btn btn-danger" style={{marginTop:"12px"}} onClick={() => {
                     const failedUrls = publishProgress.errors.map(e => e.url).filter(Boolean) as string[];
                     if (failedUrls.length === 0) return;
@@ -1356,6 +1380,43 @@ export default function Home() {
       <Modal open={showConfirm} onClose={() => setShowConfirm(false)} title={confirmData.title} small>
         <div className="confirm-body"><p><strong>{confirmData.message}</strong> будет удалено.</p></div>
         <div className="modal-footer"><button className="btn btn-secondary" onClick={() => setShowConfirm(false)}>Отмена</button><button className="btn btn-danger" onClick={() => {setShowConfirm(false);confirmData.onConfirm();}}>Удалить</button></div>
+      </Modal>
+
+      <Modal open={showSubscribeAllPrompt} onClose={() => setShowSubscribeAllPrompt(false)} title="Подписка на сообщества" small>
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          <p style={{margin:0,fontSize:14,color:"var(--text-muted)"}}>
+            Найдены сообщества, где аккаунт VK не подписан. Отправить подписку сразу на все через API?
+          </p>
+          <div style={{fontSize:13,color:"var(--text-muted)"}}>
+            Сообществ: {getNotSubscribedCommunityUrls().length}
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn btn-secondary" disabled={joiningCommunities} onClick={() => setShowSubscribeAllPrompt(false)}>Позже</button>
+          <button className="btn btn-primary" disabled={joiningCommunities} onClick={async () => {
+            const urls = getNotSubscribedCommunityUrls();
+            if (urls.length === 0) {
+              setShowSubscribeAllPrompt(false);
+              return;
+            }
+            setJoiningCommunities(true);
+            try {
+              const res = await apiFetch("/api/groups/join-bulk", {
+                method: "POST",
+                body: JSON.stringify({ urls }),
+              });
+              const joined = Number((res as { joined?: number }).joined || 0);
+              const requested = Number((res as { requested?: number }).requested || 0);
+              const failed = Number((res as { failed?: number }).failed || 0);
+              toast(`Подписка: вступил ${joined}, заявок ${requested}, ошибок ${failed}`, failed > 0 ? "warning" : "success");
+              setShowSubscribeAllPrompt(false);
+            } catch (e) {
+              toast(`Ошибка подписки: ${(e as Error).message}`, "error");
+            } finally {
+              setJoiningCommunities(false);
+            }
+          }}>{joiningCommunities ? <><span className="spinner"/> Подписка...</> : "Подписаться на все"}</button>
+        </div>
       </Modal>
 
       <div className="toast-container">

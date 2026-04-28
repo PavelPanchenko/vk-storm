@@ -19,6 +19,7 @@ export async function POST(request: NextRequest) {
 
   const rows = results.map((r) => ({
     sessionId: result.sessionId!,
+    userId: result.session.user_id,
     batchId,
     postName: r.postName,
     postText,

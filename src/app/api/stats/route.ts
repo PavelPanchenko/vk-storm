@@ -4,16 +4,16 @@ import { readGroups } from "@/lib/groups";
 import { readLogs } from "@/lib/logger";
 import { db } from "@/lib/db";
 import { posts, publishResults } from "@/lib/db/schema";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 export async function GET() {
   const result = await requireSession();
   if (result.error) return result.error;
 
-  const [postCount] = await db.select({ count: sql<number>`count(*)` }).from(posts);
+  const [postCount] = await db.select({ count: sql<number>`count(*)` }).from(posts).where(eq(posts.userId, result.session.user_id));
   const totalPosts = Number(postCount?.count || 0);
 
-  const groups = await readGroups();
+  const groups = await readGroups(result.session.user_id);
   const totalGroups = groups.length;
 
   // Count from publishResults table
@@ -22,7 +22,8 @@ export async function GET() {
       totalPublished: sql<number>`count(*) filter (where ${publishResults.success} = true)`,
       totalErrors: sql<number>`count(*) filter (where ${publishResults.success} = false)`,
     })
-    .from(publishResults);
+    .from(publishResults)
+    .where(eq(publishResults.userId, result.session.user_id));
 
   const totalPublished = Number(counts?.totalPublished || 0);
   const totalErrors = Number(counts?.totalErrors || 0);

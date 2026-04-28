@@ -6,8 +6,8 @@ import { appendLog } from "@/lib/logger";
 export async function GET() {
   const result = await requireSession();
   if (result.error) return result.error;
-  const rows = await readGroupRows();
-  const pubStats = await getPublishStats();
+  const rows = await readGroupRows(result.session.user_id);
+  const pubStats = await getPublishStats(result.session.user_id);
   return NextResponse.json(
     rows.map(r => {
       const ps = pubStats[r.url];
@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
   if (!url) return NextResponse.json({ detail: "URL обязателен" }, { status: 400 });
   if (!url.startsWith("http")) return NextResponse.json({ detail: "URL должен начинаться с http:// или https://" }, { status: 400 });
 
-  await addGroup(url, category, photo, membersCount);
+  await addGroup(result.session.user_id, url, category, photo, membersCount);
   await appendLog("INFO", `Group added: ${url} [${category}]`);
   return NextResponse.json({ status: "ok" });
 }

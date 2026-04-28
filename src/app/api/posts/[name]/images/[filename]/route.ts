@@ -9,7 +9,7 @@ export async function GET(_request: NextRequest, { params }: Params) {
   const result = await requireSession();
   if (result.error) return result.error;
   const { name, filename } = await params;
-  const post = await getPost(name);
+  const post = await getPost(result.session.user_id, name);
   if (!post) {
     return NextResponse.json({ detail: "Пост не найден" }, { status: 404 });
   }
@@ -24,7 +24,7 @@ export async function DELETE(_request: NextRequest, { params }: Params) {
   const result = await requireSession();
   if (result.error) return result.error;
   const { name, filename } = await params;
-  const post = await getPost(name);
+  const post = await getPost(result.session.user_id, name);
   if (!post) {
     return NextResponse.json({ detail: "Пост не найден" }, { status: 404 });
   }
@@ -34,6 +34,6 @@ export async function DELETE(_request: NextRequest, { params }: Params) {
   }
   try { await deleteUpload(storedUrl); } catch {}
   const remaining = post.images.filter((url) => url !== storedUrl);
-  await updatePost(name, post.text, remaining, post.videos);
+  await updatePost(result.session.user_id, name, post.text, remaining, post.videos);
   return NextResponse.json({ status: "ok" });
 }

@@ -10,7 +10,7 @@ export async function GET(_request: NextRequest, { params }: Params) {
   const result = await requireSession();
   if (result.error) return result.error;
   const { name } = await params;
-  const post = await getPost(name);
+  const post = await getPost(result.session.user_id, name);
   if (!post) {
     return NextResponse.json({ detail: "Пост не найден" }, { status: 404 });
   }
@@ -21,7 +21,7 @@ export async function PUT(request: NextRequest, { params }: Params) {
   const result = await requireSession();
   if (result.error) return result.error;
   const { name } = await params;
-  const post = await getPost(name);
+  const post = await getPost(result.session.user_id, name);
   if (!post) {
     return NextResponse.json({ detail: "Пост не найден" }, { status: 404 });
   }
@@ -43,7 +43,7 @@ export async function PUT(request: NextRequest, { params }: Params) {
     try { await deleteUpload(url); } catch {}
   }
 
-  await updatePost(name, text, imageUrls, videoUrls);
+  await updatePost(result.session.user_id, name, text, imageUrls, videoUrls);
   return NextResponse.json({ status: "ok", name });
 }
 
@@ -51,7 +51,7 @@ export async function DELETE(_request: NextRequest, { params }: Params) {
   const result = await requireSession();
   if (result.error) return result.error;
   const { name } = await params;
-  const post = await getPost(name);
+  const post = await getPost(result.session.user_id, name);
   if (!post) {
     return NextResponse.json({ detail: "Пост не найден" }, { status: 404 });
   }
@@ -60,7 +60,7 @@ export async function DELETE(_request: NextRequest, { params }: Params) {
     try { await deleteUpload(url); } catch {}
   }
 
-  await deletePost(name);
+  await deletePost(result.session.user_id, name);
   await appendLog("INFO", `Post deleted: ${name}`);
   return NextResponse.json({ status: "ok" });
 }

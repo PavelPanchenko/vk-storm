@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/api-auth";
 import { db } from "@/lib/db";
 import { publishResults } from "@/lib/db/schema";
-import { desc, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 
 export async function GET() {
   const result = await requireSession();
@@ -19,6 +19,7 @@ export async function GET() {
       failedCount: sql<number>`count(*) filter (where ${publishResults.success} = false)`.as("failed_count"),
     })
     .from(publishResults)
+    .where(eq(publishResults.userId, result.session.user_id))
     .groupBy(publishResults.batchId, publishResults.postName, publishResults.postText)
     .orderBy(desc(sql`min(${publishResults.createdAt})`))
     .limit(50);
@@ -36,7 +37,7 @@ export async function GET() {
         createdAt: publishResults.createdAt,
       })
       .from(publishResults)
-      .where(sql`${publishResults.batchId} = ${row.batchId}`)
+      .where(and(eq(publishResults.userId, result.session.user_id), eq(publishResults.batchId, row.batchId)))
       .orderBy(publishResults.createdAt);
 
     batches.push({

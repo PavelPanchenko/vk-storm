@@ -8,7 +8,7 @@ const SAFE_NAME_RE = /^[a-zA-Z0-9_\- а-яА-ЯёЁ.,!?()]+$/;
 export async function GET() {
   const result = await requireSession();
   if (result.error) return result.error;
-  return NextResponse.json(await listPosts());
+  return NextResponse.json(await listPosts(result.session.user_id));
 }
 
 export async function POST(request: NextRequest) {
@@ -31,13 +31,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ detail: "Недопустимое имя поста. Используйте буквы, цифры, _ и -" }, { status: 400 });
   }
 
-  const existing = await getPost(name);
+  const existing = await getPost(result.session.user_id, name);
   if (existing) {
     return NextResponse.json({ detail: `Пост '${name}' уже существует` }, { status: 400 });
   }
 
   try {
-    await createPost(name, text, imageUrls, videoUrls);
+    await createPost(result.session.user_id, name, text, imageUrls, videoUrls);
     await appendLog("INFO", `Post created: ${name}`);
     return NextResponse.json({ status: "ok", name });
   } catch (e) {

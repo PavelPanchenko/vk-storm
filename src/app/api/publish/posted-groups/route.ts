@@ -14,7 +14,11 @@ export async function GET(request: NextRequest) {
   const rows = await db
     .selectDistinct({ groupUrl: publishResults.groupUrl })
     .from(publishResults)
-    .where(and(eq(publishResults.postName, postName), eq(publishResults.success, true)));
+    .where(and(
+      eq(publishResults.userId, result.session.user_id),
+      eq(publishResults.postName, postName),
+      eq(publishResults.success, true),
+    ));
 
   return NextResponse.json(rows.map(r => r.groupUrl));
 }

@@ -1,4 +1,4 @@
-import { pgTable, text, integer, timestamp, boolean, serial, json } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, timestamp, boolean, serial, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const sessions = pgTable("sessions", {
   id: text("id").primaryKey(),
@@ -12,23 +12,37 @@ export const sessions = pgTable("sessions", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
-export const groups = pgTable("groups", {
-  id: serial("id").primaryKey(),
-  url: text("url").notNull().unique(),
-  category: text("category").notNull().default("Без категории"),
-  photo: text("photo").notNull().default(""),
-  membersCount: integer("members_count").notNull().default(0),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+export const groups = pgTable(
+  "groups",
+  {
+    id: serial("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    url: text("url").notNull(),
+    category: text("category").notNull().default("Без категории"),
+    photo: text("photo").notNull().default(""),
+    membersCount: integer("members_count").notNull().default(0),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    groupsUserUrlUnique: uniqueIndex("groups_user_url_unique").on(table.userId, table.url),
+  }),
+);
 
-export const posts = pgTable("posts", {
-  id: serial("id").primaryKey(),
-  name: text("name").notNull().unique(),
-  text: text("text").notNull().default(""),
-  images: text("images").array().notNull().default([]),
-  videos: text("videos").array().notNull().default([]),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+export const posts = pgTable(
+  "posts",
+  {
+    id: serial("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    name: text("name").notNull(),
+    text: text("text").notNull().default(""),
+    images: text("images").array().notNull().default([]),
+    videos: text("videos").array().notNull().default([]),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    postsUserNameUnique: uniqueIndex("posts_user_name_unique").on(table.userId, table.name),
+  }),
+);
 
 export const logs = pgTable("logs", {
   id: serial("id").primaryKey(),
@@ -37,17 +51,25 @@ export const logs = pgTable("logs", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
-export const blacklist = pgTable("blacklist", {
-  id: serial("id").primaryKey(),
-  url: text("url").notNull().unique(),
-  reason: text("reason").notNull().default(""),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+export const blacklist = pgTable(
+  "blacklist",
+  {
+    id: serial("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    url: text("url").notNull(),
+    reason: text("reason").notNull().default(""),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => ({
+    blacklistUserUrlUnique: uniqueIndex("blacklist_user_url_unique").on(table.userId, table.url),
+  }),
+);
 
 
 export const publishResults = pgTable("publish_results", {
   id: serial("id").primaryKey(),
   sessionId: text("session_id").notNull(),
+  userId: text("user_id").notNull(),
   batchId: text("batch_id").notNull().default(""),
   postName: text("post_name").notNull(),
   postText: text("post_text").notNull().default(""),

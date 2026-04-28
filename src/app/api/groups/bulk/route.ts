@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ detail: "Список URL пуст" }, { status: 400 });
   }
 
-  const existing = new Set(await readGroups());
+  const existing = new Set(await readGroups(result.session.user_id));
   let added = 0;
   let skipped = 0;
   const errors: string[] = [];
@@ -44,7 +44,7 @@ export async function POST(request: NextRequest) {
       skipped++;
       continue;
     }
-    await addGroup(url, category);
+    await addGroup(result.session.user_id, url, category);
     existing.add(url);
     added++;
   }
@@ -66,7 +66,7 @@ export async function DELETE(request: NextRequest) {
 
   let deleted = 0;
   for (const url of urls) {
-    await removeGroup(url);
+    await removeGroup(result.session.user_id, url);
     deleted++;
   }
 
@@ -91,7 +91,7 @@ export async function PATCH(request: NextRequest) {
 
   let moved = 0;
   for (const url of urls) {
-    await updateGroupCategory(url, category);
+    await updateGroupCategory(result.session.user_id, url, category);
     moved++;
   }
 

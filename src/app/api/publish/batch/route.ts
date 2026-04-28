@@ -15,6 +15,15 @@ type ProgressEvent =
   | { type: "result"; group: Group; success: boolean; error?: string; completed: number; total: number }
   | { type: "done"; success: number; failed: number };
 
+function isVkMemberResponseMember(response: unknown): boolean {
+  if (typeof response === "number") return response === 1;
+  if (response && typeof response === "object" && "member" in response) {
+    const member = (response as { member?: unknown }).member;
+    return member === 1 || member === true;
+  }
+  return false;
+}
+
 /**
  * Server-side fan-out of wall.post across N groups. Runs on a single Fluid
  * Compute instance so every call goes out from the same egress IP — this is
@@ -65,6 +74,30 @@ export async function POST(request: NextRequest) {
         if (attachments.length > 0) postParams.attachments = attachments.join(",");
 
         let errMsg: string | null = null;
+
+        const { data: memberData } = await vkMethod(auth.sessionId, auth.session, "groups.isMember", {
+          group_id: String(g.id),
+          user_id: auth.session.user_id,
+        });
+        if (memberData.error) {
+          errMsg = `Error ${memberData.error.error_code}: ${memberData.error.error_msg}`;
+        } else if (!isVkMemberResponseMember(memberData.response)) {
+          errMsg = "Аккаунт VK не подписан на это сообщество";
+        }
+
+        if (errMsg) {
+          failed++;
+          completed++;
+          send({
+            type: "result",
+            group: g,
+            success: false,
+            error: errMsg,
+            completed,
+            total,
+          });
+          return;
+        }
 
         const { data } = await vkMethod(auth.sessionId, auth.session, "wall.post", postParams);
         if (data.error) {
