@@ -20,8 +20,8 @@ export async function POST(request: NextRequest) {
   const auth = await requireSession();
   if (auth.error) return auth.error;
 
-  const body = await request.json().catch(() => ({}));
-  const urls = Array.isArray(body.urls) ? body.urls.filter((u): u is string => typeof u === "string" && u.trim().length > 0) : [];
+  const body = (await request.json().catch(() => ({}))) as { urls?: unknown };
+  const urls = Array.isArray(body.urls) ? body.urls.filter((u: unknown): u is string => typeof u === "string" && u.trim().length > 0) : [];
   if (urls.length === 0) {
     return NextResponse.json({ detail: "Список URL пуст" }, { status: 400 });
   }
