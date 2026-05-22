@@ -1,6 +1,7 @@
 import { Session, updateSessionTokens, getSession } from "./sessions";
 import { refreshTokens } from "./auth";
 import { appendLog } from "./logger";
+import { vkRateLimited } from "./vk-rate-limit";
 
 const VK_API_VERSION = "5.199";
 const MAX_TRANSIENT_RETRIES = 3;
@@ -86,7 +87,7 @@ export async function vkMethod(
   let data: VKResponse = {};
 
   for (let transientAttempt = 0; transientAttempt <= MAX_TRANSIENT_RETRIES; transientAttempt++) {
-    data = await rawCall(currentSession.access_token, method, params);
+    data = await vkRateLimited(sessionId, () => rawCall(currentSession.access_token, method, params));
     const errCode = data.error?.error_code;
 
     if (errCode === 5) {

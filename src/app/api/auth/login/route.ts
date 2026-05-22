@@ -7,7 +7,8 @@ export async function GET() {
   resp.cookies.set("vk_auth", JSON.stringify(cookiePayload), {
     httpOnly: true,
     sameSite: "lax",
-    maxAge: 600, // 10 min
+    secure: process.env.NODE_ENV === "production",
+    maxAge: 600,
     path: "/",
   });
   return resp;

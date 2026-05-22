@@ -48,9 +48,3 @@ export async function requireSession(): Promise<
 
   return { session, sessionId };
 }
-
-export async function requireAccessToken() {
-  const result = await requireSession();
-  if (result.error) return result;
-  return { ...result, accessToken: result.session.access_token };
-}

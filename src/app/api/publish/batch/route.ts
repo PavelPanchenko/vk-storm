@@ -1,11 +1,13 @@
 import { NextRequest } from "next/server";
 import { requireSession } from "@/lib/api-auth";
+import { fetchGroupMembershipMap } from "@/lib/vk-batch-membership";
 import { vkMethod } from "@/lib/vk-method";
 
 export const maxDuration = 300;
 
-/** Параллельных wall.post. Три воркера часто упираются в Error 6 после JSONP/медиа на клиенте. */
-const BATCH_WALL_POST_CONCURRENCY = 2;
+/** Последовательная публикация — меньше Error 6 при общей очереди vkMethod. */
+const BATCH_WALL_POST_CONCURRENCY = 1;
+const BETWEEN_GROUPS_MS = 650;
 
 type Group = { id: number; url: string; name: string };
 type BatchBody = { postText: string; attachments: string[]; groups: Group[] };
@@ -15,21 +17,13 @@ type ProgressEvent =
   | { type: "result"; group: Group; success: boolean; error?: string; completed: number; total: number }
   | { type: "done"; success: number; failed: number };
 
-function isVkMemberResponseMember(response: unknown): boolean {
-  if (typeof response === "number") return response === 1;
-  if (response && typeof response === "object" && "member" in response) {
-    const member = (response as { member?: unknown }).member;
-    return member === 1 || member === true;
-  }
-  return false;
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
  * Server-side fan-out of wall.post across N groups. Runs on a single Fluid
- * Compute instance so every call goes out from the same egress IP — this is
- * what keeps the IP-bound VK user token valid across the whole batch.
- *
- * Streams progress to the client as Server-Sent Events.
+ * Compute instance so every call goes out from the same egress IP.
  */
 export async function POST(request: NextRequest) {
   const auth = await requireSession();
@@ -37,11 +31,16 @@ export async function POST(request: NextRequest) {
 
   const body = (await request.json().catch(() => ({}))) as Partial<BatchBody>;
   const postText = typeof body.postText === "string" ? body.postText : "";
-  const attachments = Array.isArray(body.attachments) ? body.attachments.filter(a => typeof a === "string") : [];
-  const groups = Array.isArray(body.groups) ? body.groups.filter(g => g && typeof g.id === "number" && typeof g.url === "string") : [];
+  const attachments = Array.isArray(body.attachments) ? body.attachments.filter((a) => typeof a === "string") : [];
+  const groups = Array.isArray(body.groups)
+    ? body.groups.filter((g) => g && typeof g.id === "number" && typeof g.url === "string")
+    : [];
 
   if (groups.length === 0) {
-    return new Response(JSON.stringify({ detail: "groups required" }), { status: 400, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ detail: "groups required" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const encoder = new TextEncoder();
@@ -59,7 +58,9 @@ export async function POST(request: NextRequest) {
         }
       };
 
-      const abort = () => { closed = true; };
+      const abort = () => {
+        closed = true;
+      };
       request.signal.addEventListener("abort", abort);
 
       send({ type: "started", total });
@@ -69,49 +70,41 @@ export async function POST(request: NextRequest) {
       let completed = 0;
       const queue: Group[] = [...groups];
 
+      const { map: membership, session: sessionAfterCheck } = await fetchGroupMembershipMap(
+        auth.sessionId,
+        auth.session,
+        auth.session.user_id,
+        groups.map((g) => g.id),
+      );
+      let currentSession = sessionAfterCheck;
+
       const publishOne = async (g: Group) => {
         const postParams: Record<string, string> = { owner_id: String(-g.id), message: postText };
         if (attachments.length > 0) postParams.attachments = attachments.join(",");
 
         let errMsg: string | null = null;
 
-        const { data: memberData } = await vkMethod(auth.sessionId, auth.session, "groups.isMember", {
-          group_id: String(g.id),
-          user_id: auth.session.user_id,
-        });
-        if (memberData.error) {
-          errMsg = `Error ${memberData.error.error_code}: ${memberData.error.error_msg}`;
-        } else if (!isVkMemberResponseMember(memberData.response)) {
+        if (!membership.get(g.id)) {
           errMsg = "Аккаунт VK не подписан на это сообщество";
-        }
-
-        if (errMsg) {
-          failed++;
-          completed++;
-          send({
-            type: "result",
-            group: g,
-            success: false,
-            error: errMsg,
-            completed,
-            total,
-          });
-          return;
-        }
-
-        const { data } = await vkMethod(auth.sessionId, auth.session, "wall.post", postParams);
-        if (data.error) {
-          const code = data.error.error_code;
-          // 1051/15/214 → стена закрыта, но предложка может быть открыта
-          if (code === 1051 || code === 15 || code === 214) {
-            await new Promise(r => setTimeout(r, 350 + Math.random() * 350));
-            if (closed) return;
-            const { data: suggestData } = await vkMethod(auth.sessionId, auth.session, "wall.post", { ...postParams, suggest: "1" });
-            if (suggestData.error) {
-              errMsg = `Error ${suggestData.error.error_code}: ${suggestData.error.error_msg}`;
+        } else {
+          const { data, session: ns } = await vkMethod(auth.sessionId, currentSession, "wall.post", postParams);
+          currentSession = ns;
+          if (data.error) {
+            const code = data.error.error_code;
+            if (code === 1051 || code === 15 || code === 214) {
+              await sleep(350 + Math.random() * 350);
+              if (closed) return;
+              const { data: suggestData, session: ns2 } = await vkMethod(auth.sessionId, currentSession, "wall.post", {
+                ...postParams,
+                suggest: "1",
+              });
+              currentSession = ns2;
+              if (suggestData.error) {
+                errMsg = `Error ${suggestData.error.error_code}: ${suggestData.error.error_msg}`;
+              }
+            } else {
+              errMsg = `Error ${code}: ${data.error.error_msg}`;
             }
-          } else {
-            errMsg = `Error ${code}: ${data.error.error_msg}`;
           }
         }
 
@@ -147,16 +140,20 @@ export async function POST(request: NextRequest) {
               total,
             });
           }
+          if (queue.length > 0 && !closed) {
+            await sleep(BETWEEN_GROUPS_MS + Math.floor(Math.random() * 200));
+          }
         }
       };
 
-      // vkMethod backs off on Error 6 / 10; lower concurrency avoids bursts with client-side API calls.
       await Promise.all(Array.from({ length: BATCH_WALL_POST_CONCURRENCY }, () => worker()));
 
       send({ type: "done", success, failed });
       request.signal.removeEventListener("abort", abort);
       if (!closed) {
-        try { controller.close(); } catch {}
+        try {
+          controller.close();
+        } catch {}
       }
     },
   });
@@ -165,7 +162,7 @@ export async function POST(request: NextRequest) {
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
+      Connection: "keep-alive",
       "X-Accel-Buffering": "no",
     },
   });

@@ -65,6 +65,7 @@ export async function POST(request: NextRequest) {
   resp.cookies.set("session_id", sessionId, {
     httpOnly: true,
     sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
     maxAge: 86400 * 30,
   });
   return resp;

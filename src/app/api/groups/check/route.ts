@@ -1,26 +1,21 @@
 import { NextResponse } from "next/server";
-import { requireAccessToken } from "@/lib/api-auth";
+import { requireSession } from "@/lib/api-auth";
 import { readGroups, updateGroupPhoto, updateGroupMembersCount } from "@/lib/groups";
-import { VKClient } from "@/lib/vk-client";
+import { checkGroups } from "@/lib/vk-discovery";
 
 export async function POST() {
-  const result = await requireAccessToken();
-  if (result.error) return result.error;
+  const auth = await requireSession();
+  if (auth.error) return auth.error;
 
-  const groups = await readGroups(result.session.user_id);
+  const groups = await readGroups(auth.session.user_id);
   if (groups.length === 0) return NextResponse.json([]);
 
-  const client = new VKClient(result.accessToken!);
-  const results = await client.checkGroups(groups);
+  const results = await checkGroups(auth.sessionId, auth.session, groups);
 
   for (const r of results) {
-    const url = r.url as string;
-    if (r.photo && url) {
-      await updateGroupPhoto(result.session.user_id, url, r.photo as string);
-    }
-    if (r.members_count && url) {
-      await updateGroupMembersCount(result.session.user_id, url, r.members_count as number);
-    }
+    if (r.status !== "ok" || !r.url) continue;
+    if (r.photo) await updateGroupPhoto(auth.session.user_id, r.url, r.photo);
+    if (r.members_count) await updateGroupMembersCount(auth.session.user_id, r.url, r.members_count);
   }
 
   return NextResponse.json(results);

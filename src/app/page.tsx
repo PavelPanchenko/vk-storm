@@ -1,7 +1,10 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import Image from "next/image";
 import { vkGroupPathKey, vkNumericGroupIdFromUrl } from "@/lib/vk-group-url";
+
+type Theme = "dark" | "light";
 
 async function uploadFile(
   file: File,
@@ -55,8 +58,8 @@ let toastId = 0;
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
-  const [vkToken, setVkToken] = useState("");
   const [tab, setTab] = useState("dashboard");
+  const [theme, setTheme] = useState<Theme>("dark");
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -119,6 +122,8 @@ export default function Home() {
   const [parserCityId, setParserCityId] = useState<number | undefined>();
   const [parserCitySuggestions, setParserCitySuggestions] = useState<{ id: number; title: string; region?: string }[]>([]);
   const [parserCityOpen, setParserCityOpen] = useState(false);
+  const [parserMembersMin, setParserMembersMin] = useState("");
+  const [parserMembersMax, setParserMembersMax] = useState("");
   const [blacklistedUrls, setBlacklistedUrls] = useState<Set<string>>(new Set());
 
   // Publish
@@ -156,7 +161,7 @@ export default function Home() {
     if (res.status === 401) {
       let reason = "";
       try { const d = await res.json(); reason = d.reason || ""; } catch {}
-      setUser(null); setVkToken("");
+      setUser(null);
       // Force a clean re-auth when the session has expired or refresh failed
       if (reason === "expired" || reason === "refresh_failed" || reason === "refresh_error") {
         try { window.location.href = "/"; } catch {}
@@ -175,8 +180,35 @@ export default function Home() {
 
   /* ===== AUTH ===== */
   useEffect(() => {
-    apiFetch("/api/auth/me").then(d => { setUser(d); setVkToken(d.access_token || ""); setAuthChecked(true); }).catch(() => setAuthChecked(true));
+    apiFetch("/api/auth/me").then(d => { setUser(d); setAuthChecked(true); }).catch(() => setAuthChecked(true));
   }, [apiFetch]);
+
+  /* ===== THEME ===== */
+  useEffect(() => {
+    const stored = (typeof window !== "undefined" && localStorage.getItem("theme")) as Theme | null;
+    const initial: Theme = stored === "light" || stored === "dark" ? stored : "dark";
+    setTheme(initial);
+    document.documentElement.setAttribute("data-theme", initial);
+  }, []);
+
+  const toggleTheme = useCallback(() => {
+    setTheme(prev => {
+      const next: Theme = prev === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      try { localStorage.setItem("theme", next); } catch {}
+      return next;
+    });
+  }, []);
+
+  /* ===== DOCUMENT TITLE (показывать прогресс публикации во вкладке) ===== */
+  useEffect(() => {
+    const base = "VK Storm";
+    if (!publishing) {
+      document.title = base;
+      return;
+    }
+    document.title = `(${publishProgress.progress}%) ${publishProgress.status} — ${base}`;
+  }, [publishing, publishProgress.progress, publishProgress.status]);
 
   const vkOneTapRef = useRef<HTMLDivElement>(null);
 
@@ -198,10 +230,25 @@ export default function Home() {
 
     let codeVerifierStored = "";
 
+    type VKIDOneTapInstance = {
+      render: (opts: { container: HTMLElement; showAlternativeLogin?: boolean }) => VKIDOneTapInstance;
+      on: (event: string, cb: (payload: VKIDLoginPayload | VKIDErrorPayload) => void) => VKIDOneTapInstance;
+    };
+    type VKIDLoginPayload = { code: string; device_id: string };
+    type VKIDErrorPayload = { code?: string; message?: string };
+    type VKIDSDK = {
+      Config: { init: (opts: Record<string, unknown>) => void };
+      ConfigResponseMode: { Callback: string };
+      ConfigSource: { LOWCODE: string };
+      WidgetEvents: { ERROR: string };
+      OneTapInternalEvents: { LOGIN_SUCCESS: string };
+      OneTap: new () => VKIDOneTapInstance;
+    };
+
     const script = document.createElement("script");
     script.src = "https://unpkg.com/@vkid/sdk@<3.0.0/dist-sdk/umd/index.js";
     script.onload = async () => {
-      const VKID = (window as any).VKIDSDK;
+      const VKID = (window as unknown as { VKIDSDK?: VKIDSDK }).VKIDSDK;
       if (!VKID) return;
 
       const pkce = await generatePKCE();
@@ -224,13 +271,12 @@ export default function Home() {
         container: vkOneTapRef.current,
         showAlternativeLogin: true,
       })
-      .on(VKID.WidgetEvents.ERROR, (err: any) => {
+      .on(VKID.WidgetEvents.ERROR, (err) => {
         console.error("VK ID error", err);
         toast("Ошибка авторизации VK ID", "error");
       })
-      .on(VKID.OneTapInternalEvents.LOGIN_SUCCESS, (payload: any) => {
-        const code = payload.code;
-        const deviceId = payload.device_id;
+      .on(VKID.OneTapInternalEvents.LOGIN_SUCCESS, (payload) => {
+        const { code, device_id: deviceId } = payload as VKIDLoginPayload;
 
         // Send code + our PKCE verifier to server for exchange
         fetch("/api/auth/vkid", {
@@ -394,6 +440,7 @@ export default function Home() {
   };
 
   const checkAllGroups = async () => {
+    if (publishingRef.current) { toast("Дождитесь окончания публикации", "warning"); return; }
     try { toast("Проверка групп...", "info"); await apiFetch("/api/groups/check", { method: "POST" }); toast("Проверка завершена", "success"); loadGroups(); } catch {}
   };
 
@@ -428,8 +475,8 @@ export default function Home() {
     loadGroups();
   };
 
-  const vkProxyCall = useCallback(async (method: string, params: Record<string, string | number>): Promise<Record<string, unknown>> => {
-    const data = await apiFetch("/api/vk/call", { method: "POST", body: JSON.stringify({ method, params }) });
+  const vkProxyCall = useCallback(async (method: string, params: Record<string, string | number>, signal?: AbortSignal): Promise<Record<string, unknown>> => {
+    const data = await apiFetch("/api/vk/call", { method: "POST", body: JSON.stringify({ method, params }), signal });
     if (data.error) {
       const err = data.error as Record<string, unknown>;
       throw new Error(`VK API Error ${err.error_code}: ${err.error_msg}`);
@@ -437,26 +484,36 @@ export default function Home() {
     return data.response as Record<string, unknown>;
   }, [apiFetch]);
 
-  const fetchFriendsInGroup = useCallback(async (groupId: string | number): Promise<number> => {
-    if (!user) return 0;
+  const fetchFriendsBatch = useCallback(async (groupIds: string[], signal?: AbortSignal): Promise<Record<string, number>> => {
+    if (!user || groupIds.length === 0) return {};
     try {
-      const resp = await vkProxyCall("groups.getMembers", { group_id: String(groupId), filter: "friends", count: "0" });
-      return (resp.count as number) || 0;
-    } catch { return 0; }
-  }, [user, vkProxyCall]);
+      const resp = await apiFetch("/api/groups/friends-batch", {
+        method: "POST",
+        body: JSON.stringify({ groupIds }),
+        signal,
+      }) as { counts?: Record<string, number> };
+      return resp.counts || {};
+    } catch { return {}; }
+  }, [user, apiFetch]);
 
   const loadGroupsFriends = async () => {
-    if (!user || groups.length === 0) return;
+    if (!user || groups.length === 0 || publishingRef.current) return;
     setLoadingFriends(true);
-    const result: Record<string, number> = {};
-    for (const g of groups) {
-      const screenName = g.url.replace(/\/$/, "").split("/").pop() || "";
-      const count = await fetchFriendsInGroup(screenName);
-      result[g.url] = count;
-      setGroupFriends(prev => ({ ...prev, [g.url]: count }));
-      await new Promise(r => setTimeout(r, 350));
+    try {
+      const idMap = new Map<string, string>();
+      for (const g of groups) {
+        const screenName = g.url.replace(/\/$/, "").split("/").pop() || "";
+        if (screenName) idMap.set(screenName, g.url);
+      }
+      const counts = await fetchFriendsBatch(Array.from(idMap.keys()));
+      setGroupFriends(prev => {
+        const next = { ...prev };
+        for (const [sn, url] of idMap) next[url] = counts[sn] ?? 0;
+        return next;
+      });
+    } finally {
+      setLoadingFriends(false);
     }
-    setLoadingFriends(false);
   };
 
   // Map of existing group URLs to their data for parser cross-check
@@ -470,8 +527,8 @@ export default function Home() {
     setParserCityId(undefined);
     if (q.trim().length < 2 || !user) { setParserCitySuggestions([]); setParserCityOpen(false); return; }
     try {
-      const resp = await vkApiFetch("database.getCities", { country_id: "1", q: q.trim(), need_all: "0", count: "10" });
-      const items = ((resp.items || []) as Record<string, unknown>[]).map((c: Record<string, unknown>) => ({ id: c.id as number, title: c.title as string, region: c.region as string | undefined }));
+      const resp = await apiFetch(`/api/cities?q=${encodeURIComponent(q.trim())}`) as { items?: { id: number; title: string; region?: string }[] };
+      const items = resp.items || [];
       setParserCitySuggestions(items);
       setParserCityOpen(items.length > 0);
     } catch { setParserCitySuggestions([]); }
@@ -483,51 +540,44 @@ export default function Home() {
     setParserCityOpen(false);
   };
 
+  const parserFriendsAbortRef = useRef<AbortController | null>(null);
+
   const parserSearch = async (offset = 0) => {
     if (!parserQuery.trim() || !user) return;
     setParserSearching(true);
+    parserFriendsAbortRef.current?.abort();
     try {
-      const params: Record<string, string> = {
-        q: parserQuery.trim(),
-        count: "40",
-        offset: String(offset),
-        fields: "members_count,activity,description,can_post,can_suggest,city",
+      const sp = new URLSearchParams({ q: parserQuery.trim(), count: "40", offset: String(offset) });
+      if (parserCityId) sp.set("city_id", String(parserCityId));
+      const resp = await apiFetch(`/api/groups/search?${sp}`) as {
+        total: number;
+        items: { id: number; name: string; screen_name: string; photo: string; members_count: number; activity: string; description: string; is_closed: number; can_post: boolean; can_suggest: boolean; url: string }[];
       };
-      if (parserCityId) params.city_id = String(parserCityId);
-      const resp = await vkApiFetch("groups.search", params);
-      const items = ((resp.items || []) as Record<string, unknown>[]).map((g: Record<string, unknown>) => ({
-        id: g.id as number,
-        name: (g.name as string) || "",
-        screen_name: (g.screen_name as string) || "",
-        photo: (g.photo_50 || g.photo_100 || "") as string,
-        members_count: (g.members_count as number) || 0,
-        activity: (g.activity as string) || "",
-        description: ((g.description as string) || "").slice(0, 200),
-        is_closed: (g.is_closed as number) || 0,
-        can_post: Boolean(g.can_post),
-        can_suggest: Boolean(g.can_suggest),
-        url: `https://vk.com/${(g.screen_name as string) || `club${g.id}`}`,
-      }));
-      const d = { total: (resp.count as number) || 0, items };
+      const items = resp.items || [];
       if (offset === 0) {
-        setParserResults(d.items);
+        setParserResults(items);
         setParserSelectedIds(new Set());
       } else {
-        setParserResults(prev => [...prev, ...d.items]);
+        setParserResults(prev => [...prev, ...items]);
       }
-      setParserTotal(d.total);
-      // Fetch friends count in background
-      const fetchedItems = offset === 0 ? d.items : d.items;
+      setParserTotal(resp.total || 0);
+
+      const abort = new AbortController();
+      parserFriendsAbortRef.current = abort;
       (async () => {
-        for (const item of fetchedItems) {
-          const fc = await fetchFriendsInGroup(item.screen_name || `club${item.id}`);
-          setParserResults(prev => prev.map(p => p.id === item.id ? { ...p, friends_count: fc } : p));
-          await new Promise(r => setTimeout(r, 350));
-        }
+        const groupIds = items.map(g => g.screen_name || `club${g.id}`).filter(Boolean);
+        const counts = await fetchFriendsBatch(groupIds, abort.signal);
+        if (abort.signal.aborted) return;
+        setParserResults(prev => prev.map(p => {
+          const key = p.screen_name || `club${p.id}`;
+          return key in counts ? { ...p, friends_count: counts[key] } : p;
+        }));
       })();
     } catch (e) { toast((e as Error).message, "error"); }
     finally { setParserSearching(false); }
   };
+
+  useEffect(() => () => parserFriendsAbortRef.current?.abort(), []);
 
   const parserToggleSelect = (id: number) => {
     setParserSelectedIds(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -601,21 +651,30 @@ export default function Home() {
   };
 
   const publishCancelRef = useRef(false);
+  const publishingRef = useRef(false);
+
+  const publishAbortRef = useRef<AbortController | null>(null);
 
   const startPublish = async () => {
+    if (publishingRef.current) return;
     if (!publishPost) { toast("Выберите пост", "warning"); return; }
     if (publishGroups.size === 0) { toast("Выберите группы", "warning"); return; }
     if (!user) { toast("Требуется авторизация", "error"); return; }
 
-    // Get post data
     const post = posts.find(p => p.name === publishPost);
     if (!post) { toast("Пост не найден", "error"); return; }
 
     const selectedUrls = Array.from(publishGroups).map(i => groups[i]?.url).filter(Boolean);
     if (selectedUrls.length === 0) { toast("Не выбраны группы", "warning"); return; }
 
-    setPublishing(true); setShowProgress(true); setShowResults(false);
+    setPublishing(true);
+    publishingRef.current = true;
+    setShowProgress(true);
+    setShowResults(false);
     publishCancelRef.current = false;
+    const abortCtrl = new AbortController();
+    publishAbortRef.current = abortCtrl;
+
     const progress = { progress: 0, status: "Проверка групп...", done: false, success: 0, failed: 0, errors: [] as { group: string; error: string; url?: string }[] };
     setPublishProgress({ ...progress });
 
@@ -623,9 +682,7 @@ export default function Home() {
     const publishResults: { postName: string; groupUrl: string; groupName?: string; success: boolean; error?: string }[] = [];
 
     try {
-      // 1. Batch check groups (groups.getById — comma-separated ids/short names).
-      // Сопоставление: по screen_name и по числовому id из club*/public* в URL — иначе
-      // при «красивом» адресе сообщества VK вернёт другой screen_name и все группы отфильтруются.
+      // 1. Проверка групп через groups.getById с маппингом по screen_name и числовому id.
       const screenNameToUrl = new Map(
         selectedUrls.map((u) => [vkGroupPathKey(u), u] as const).filter(([k]) => k.length > 0),
       );
@@ -635,9 +692,11 @@ export default function Home() {
         if (nid != null) idToUrl.set(nid, u);
       }
       const groupsResp = await vkApiFetch("groups.getById", { group_ids: Array.from(screenNameToUrl.keys()).join(","), fields: "can_post,can_suggest" });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const groupsList: any[] = (groupsResp as any).groups || (Array.isArray(groupsResp) ? groupsResp : []);
-      const validGroups = groupsList.map((g: Record<string, unknown>) => {
+      const groupsContainer = groupsResp as { groups?: Record<string, unknown>[] };
+      const groupsList: Record<string, unknown>[] = Array.isArray(groupsContainer.groups)
+        ? groupsContainer.groups
+        : (Array.isArray(groupsResp) ? (groupsResp as Record<string, unknown>[]) : []);
+      const validGroups = groupsList.map((g) => {
         const id = Number(g.id);
         const sn = String(g.screen_name ?? "").toLowerCase();
         const url = screenNameToUrl.get(sn) || idToUrl.get(id) || "";
@@ -651,81 +710,47 @@ export default function Home() {
 
       if (validGroups.length === 0) {
         progress.status = "Нет доступных групп"; progress.done = true;
-        setPublishProgress({ ...progress }); setPublishing(false); setShowResults(true);
+        setPublishProgress({ ...progress }); setShowResults(true);
         return;
       }
 
-      // 2. Upload media ONCE to the user's wall; the resulting photo{owner_id}_{id}
-      //    and video{owner_id}_{id} attachments are valid in wall.post for ANY community.
+      // 2. Загрузка медиа на сервере (один IP + общий rate limiter для VK API).
       const hasImages = post.images && post.images.length > 0;
       const hasVideos = post.videos && post.videos.length > 0;
-      const sharedAttachments: string[] = [];
       const mediaTotal = (hasImages ? post.images.length : 0) + (hasVideos ? post.videos.length : 0);
-      let mediaDone = 0;
+      let sharedAttachments: string[] = [];
 
       progress.status = "Загрузка медиа...";
       progress.progress = 0;
       setPublishProgress({ ...progress });
 
-      if (hasImages) {
-        for (let i = 0; i < post.images.length; i++) {
-          if (publishCancelRef.current) break;
-          try {
-            const serverResp = await vkApiFetch("photos.getWallUploadServer", {});
-            const uploadUrl = (serverResp as Record<string, unknown>).upload_url as string;
-
-            const proxyResp = await apiFetch("/api/vk-upload-proxy", {
-              method: "POST",
-              body: JSON.stringify({ upload_url: uploadUrl, image_url: post.images[i] }),
-            });
-
-            if (!proxyResp.photo || proxyResp.photo === "[]") {
-              mediaDone++;
-              progress.progress = mediaTotal > 0 ? Math.round((mediaDone / mediaTotal) * 30) : 30;
-              setPublishProgress({ ...progress });
-              continue;
-            }
-
-            const saved = await vkApiFetch("photos.saveWallPhoto", {
-              server: String(proxyResp.server),
-              photo: proxyResp.photo,
-              hash: proxyResp.hash,
-            });
-            const savedArr = Array.isArray(saved) ? saved : ((saved as Record<string, unknown>).items as unknown[] || []);
-            if (savedArr.length > 0) {
-              const photo = savedArr[0] as Record<string, unknown>;
-              sharedAttachments.push(`photo${photo.owner_id}_${photo.id}`);
-            }
-          } catch (e) {
-            progress.errors.push({ group: "—", error: `Фото: ${(e as Error).message}` });
-          }
-          mediaDone++;
-          progress.progress = mediaTotal > 0 ? Math.round((mediaDone / mediaTotal) * 30) : 30;
-          setPublishProgress({ ...progress });
-          if (i < post.images.length - 1) await new Promise(r => setTimeout(r, 300));
+      if (mediaTotal > 0 && !publishCancelRef.current) {
+        const mediaResp = await apiFetch("/api/publish/upload-media", {
+          method: "POST",
+          body: JSON.stringify({
+            images: hasImages ? post.images : [],
+            videos: hasVideos ? post.videos : [],
+            name: publishPost,
+          }),
+          signal: abortCtrl.signal,
+        }) as { attachments?: string[]; errors?: string[] };
+        sharedAttachments = Array.isArray(mediaResp.attachments) ? mediaResp.attachments : [];
+        for (const err of Array.isArray(mediaResp.errors) ? mediaResp.errors : []) {
+          progress.errors.push({ group: "—", error: err });
         }
+        progress.progress = 30;
+        setPublishProgress({ ...progress });
       }
 
-      if (hasVideos) {
-        for (let i = 0; i < post.videos.length; i++) {
-          if (publishCancelRef.current) break;
-          try {
-            const vp = await apiFetch("/api/vk-video-upload-proxy", {
-              method: "POST",
-              body: JSON.stringify({ video_url: post.videos[i], name: publishPost }),
-            });
-            if (vp.attachment) sharedAttachments.push(vp.attachment);
-          } catch (e) {
-            progress.errors.push({ group: "—", error: `Видео: ${(e as Error).message}` });
-          }
-          mediaDone++;
-          progress.progress = mediaTotal > 0 ? Math.round((mediaDone / mediaTotal) * 30) : 30;
-          setPublishProgress({ ...progress });
-        }
+      if (publishCancelRef.current) {
+        progress.status = "Отменено";
+        progress.done = true;
+        setPublishProgress({ ...progress });
+        setShowResults(true);
+        return;
       }
 
-      // Если пост задуман с медиа, но ни одно вложение не загрузилось — не публикуем текст молча.
-      if (mediaTotal > 0 && sharedAttachments.length === 0 && !publishCancelRef.current) {
+      if (mediaTotal > 0 && sharedAttachments.length === 0) {
         progress.status = "Не удалось загрузить медиа — публикация отменена";
         progress.done = true;
         setPublishProgress({ ...progress });
@@ -733,19 +758,11 @@ export default function Home() {
         return;
       }
 
-      // 3. Server-side fan-out of wall.post via SSE. Ключ: все wall.post
-      //    уходят с одного Lambda-инстанса = один egress IP, и IP-bound
-      //    токен не инвалидируется между запросами. Прогресс стримится
-      //    обратно событиями SSE.
+      // 3. Server-side fan-out of wall.post через SSE.
       const total = validGroups.length;
       progress.status = `Публикация (0/${total})`;
       progress.progress = 30;
       setPublishProgress({ ...progress });
-
-      const abortCtrl = new AbortController();
-      const cancelWatcher = setInterval(() => {
-        if (publishCancelRef.current) abortCtrl.abort();
-      }, 200);
 
       try {
         const resp = await fetch("/api/publish/batch", {
@@ -774,7 +791,6 @@ export default function Home() {
           buffer += decoder.decode(value, { stream: true });
 
           let idx: number;
-          // SSE events separated by blank line
           while ((idx = buffer.indexOf("\n\n")) !== -1) {
             const chunk = buffer.slice(0, idx);
             buffer = buffer.slice(idx + 2);
@@ -804,8 +820,6 @@ export default function Home() {
         if (!publishCancelRef.current) {
           progress.errors.push({ group: "—", error: `Ошибка стрима: ${(e as Error).message}` });
         }
-      } finally {
-        clearInterval(cancelWatcher);
       }
 
       const cancelled = publishCancelRef.current;
@@ -819,18 +833,29 @@ export default function Home() {
       setPublishProgress({ ...progress });
       setShowResults(true);
 
-      // Сохраняем даже частичные результаты при отмене — юзеру полезно видеть, что успело уйти
       if (publishResults.length > 0) {
         try {
           await apiFetch("/api/publish/results", { method: "POST", body: JSON.stringify({ batchId, postText: post.text, results: publishResults }) });
         } catch {}
       }
     } catch (e) {
-      progress.status = `Ошибка: ${(e as Error).message}`; progress.done = true;
+      if (publishCancelRef.current && (e as Error).name === "AbortError") {
+        progress.status = "Отменено";
+      } else {
+        progress.status = `Ошибка: ${(e as Error).message}`;
+      }
+      progress.done = true;
       setPublishProgress({ ...progress }); setShowResults(true);
     } finally {
+      publishAbortRef.current = null;
+      publishingRef.current = false;
       setPublishing(false);
     }
+  };
+
+  const cancelPublish = () => {
+    publishCancelRef.current = true;
+    publishAbortRef.current?.abort();
   };
 
 
@@ -890,10 +915,19 @@ export default function Home() {
           </nav>
           <div className="sidebar-footer">
             <div className="user-info">
-              {user.avatar && <img className="user-avatar" src={user.avatar} alt="" />}
+              {user.avatar && (
+                <Image className="user-avatar" src={user.avatar} alt="" width={36} height={36} unoptimized />
+              )}
               <div className="user-name">{user.name || "Пользователь"}</div>
             </div>
-            <button className="logout-btn" onClick={logout}>Выйти</button>
+            <div style={{display:"flex",gap:6}}>
+              <button className="btn btn-secondary btn-sm" onClick={toggleTheme} title="Сменить тему" style={{flex:"0 0 auto",padding:"6px 10px"}}>
+                {theme === "dark"
+                  ? <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+                  : <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>}
+              </button>
+              <button className="logout-btn" onClick={logout} style={{flex:1}}>Выйти</button>
+            </div>
           </div>
         </aside>
 
@@ -1015,7 +1049,9 @@ export default function Home() {
                     return (
                       <div key={realIndex} className="group-card">
                         <input type="checkbox" checked={groupSelectedIds.has(realIndex)} onChange={() => setGroupSelectedIds(prev => { const n = new Set(prev); if (n.has(realIndex)) n.delete(realIndex); else n.add(realIndex); return n; })} style={{accentColor:"var(--accent)",width:16,height:16,flexShrink:0,cursor:"pointer"}}/>
-                        {g.photo ? <img src={g.photo} alt="" style={{width:40,height:40,borderRadius:10,objectFit:"cover",flexShrink:0}}/> : <div className={`status-dot ${g.status==="ok"?"green":g.status==="error"?"red":"gray"}`}/>}
+                        {g.photo
+                          ? <Image src={g.photo} alt="" width={40} height={40} unoptimized style={{borderRadius:10,objectFit:"cover",flexShrink:0}}/>
+                          : <div className={`status-dot ${g.status==="ok"?"green":g.status==="error"?"red":"gray"}`}/>}
                         <div className="group-info" style={{flex:1,minWidth:0}}>
                           <div className="group-name"><a href={g.url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{color:"inherit",textDecoration:"none"}}>{g.name} <svg viewBox="0 0 24 24" width="12" height="12" style={{opacity:0.4,verticalAlign:"middle"}}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" fill="none" stroke="currentColor" strokeWidth="2"/><polyline points="15 3 21 3 21 9" fill="none" stroke="currentColor" strokeWidth="2"/><line x1="10" y1="14" x2="21" y2="3" stroke="currentColor" strokeWidth="2"/></svg></a></div>
                           <div className="group-url" style={{display:"flex",gap:8,flexWrap:"wrap",fontSize:12}}>
@@ -1126,7 +1162,7 @@ export default function Home() {
                 <button className="btn btn-primary" disabled={publishing} onClick={startPublish}>
                   {publishing ? <><span className="spinner"/> Публикация...</> : <><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Опубликовать</>}
                 </button>
-                {publishing && <button className="btn btn-danger" onClick={() => { publishCancelRef.current = true; }}>Отменить</button>}
+                {publishing && <button className="btn btn-danger" onClick={cancelPublish}>Отменить</button>}
               </div>
               {showProgress && <div className="progress-section active">
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
@@ -1248,6 +1284,8 @@ export default function Home() {
               <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:16,flexWrap:"wrap"}}>
                 <input className="input" value={parserCategory} onChange={e => setParserCategory(e.target.value)} placeholder="Категория для добавления" style={{maxWidth:250}} list="parser-cat-list"/>
                 <datalist id="parser-cat-list">{Array.from(new Set(groups.map(g=>g.category))).map(c=><option key={c} value={c}/>)}</datalist>
+                <input className="input" type="number" min={0} value={parserMembersMin} onChange={e => setParserMembersMin(e.target.value)} placeholder="Уч. от" style={{maxWidth:110}}/>
+                <input className="input" type="number" min={0} value={parserMembersMax} onChange={e => setParserMembersMax(e.target.value)} placeholder="Уч. до" style={{maxWidth:110}}/>
                 {parserResults.length > 0 && (<>
                   <button className="btn btn-secondary btn-sm" onClick={parserSelectAllOpen}>
                     {parserResults.filter(g => g.is_closed === 0 && !isGroupExisting(g.url) && !isGroupBlacklisted(g.url)).every(g => parserSelectedIds.has(g.id)) && parserResults.some(g => g.is_closed === 0 && !isGroupExisting(g.url) && !isGroupBlacklisted(g.url)) ? "Снять все" : "Выбрать все"}
@@ -1257,19 +1295,35 @@ export default function Home() {
                   </button>
                 </>)}
               </div>
-              {parserResults.length > 0 && <div style={{fontSize:13,color:"var(--text-muted)",marginBottom:12}}>Найдено: {parserTotal.toLocaleString("ru-RU")} групп</div>}
-              <div className="groups-list">
-                {parserResults.length === 0 && !parserSearching && <div className="empty-state"><p>Введите запрос для поиска групп и сообществ VK</p></div>}
-                {parserSearching && parserResults.length === 0 && <div className="empty-state"><span className="spinner"/></div>}
-                {parserResults.map(g => {
-                  const existing = getExistingGroup(g.url);
-                  const added = isGroupExisting(g.url);
-                  const blocked = isGroupBlacklisted(g.url);
-                  const disabled = g.is_closed > 0 || added || blocked;
-                  return (
+              {(() => {
+                const min = Number(parserMembersMin) || 0;
+                const max = Number(parserMembersMax) || 0;
+                const filtered = parserResults.filter(g => {
+                  if (min > 0 && g.members_count < min) return false;
+                  if (max > 0 && g.members_count > max) return false;
+                  return true;
+                });
+                return <>
+                  {parserResults.length > 0 && (
+                    <div style={{fontSize:13,color:"var(--text-muted)",marginBottom:12}}>
+                      Найдено: {parserTotal.toLocaleString("ru-RU")} групп
+                      {(min > 0 || max > 0) && filtered.length !== parserResults.length && (
+                        <span> · показано после фильтра: {filtered.length}</span>
+                      )}
+                    </div>
+                  )}
+                  <div className="groups-list">
+                    {parserResults.length === 0 && !parserSearching && <div className="empty-state"><p>Введите запрос для поиска групп и сообществ VK</p></div>}
+                    {parserSearching && parserResults.length === 0 && <div className="empty-state"><span className="spinner"/></div>}
+                    {filtered.map(g => {
+                      const existing = getExistingGroup(g.url);
+                      const added = isGroupExisting(g.url);
+                      const blocked = isGroupBlacklisted(g.url);
+                      const disabled = g.is_closed > 0 || added || blocked;
+                      return (
                   <div key={g.id} className={`group-card${parserSelectedIds.has(g.id) ? " selected" : ""}`} style={{opacity: g.is_closed ? 0.5 : 1, cursor: disabled ? "default" : "pointer"}} onClick={() => { if (!disabled) parserToggleSelect(g.id); }}>
                     <input type="checkbox" checked={parserSelectedIds.has(g.id)} disabled={disabled} onChange={() => parserToggleSelect(g.id)} onClick={e => e.stopPropagation()} style={{accentColor:"var(--accent)",width:18,height:18,flexShrink:0,cursor:"pointer"}}/>
-                    {g.photo && <img src={g.photo} alt="" style={{width:44,height:44,borderRadius:10,objectFit:"cover",flexShrink:0}}/>}
+                    {g.photo && <Image src={g.photo} alt="" width={44} height={44} unoptimized style={{borderRadius:10,objectFit:"cover",flexShrink:0}}/>}
                     <div className="group-info" style={{minWidth:0,flex:1}}>
                       <div className="group-name"><a href={g.url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{color:"inherit",textDecoration:"none"}}>{g.name} <svg viewBox="0 0 24 24" width="12" height="12" style={{opacity:0.4,verticalAlign:"middle"}}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" fill="none" stroke="currentColor" strokeWidth="2"/><polyline points="15 3 21 3 21 9" fill="none" stroke="currentColor" strokeWidth="2"/><line x1="10" y1="14" x2="21" y2="3" stroke="currentColor" strokeWidth="2"/></svg></a></div>
                       <div className="group-url" style={{display:"flex",gap:8,flexWrap:"wrap",fontSize:12}}>
@@ -1302,7 +1356,9 @@ export default function Home() {
                   </div>
                   );
                 })}
-              </div>
+                  </div>
+                </>;
+              })()}
               {parserResults.length > 0 && parserResults.length < parserTotal && (
                 <div style={{textAlign:"center",marginTop:16}}>
                   <button className="btn btn-secondary" disabled={parserSearching} onClick={() => parserSearch(parserResults.length)}>
@@ -1323,7 +1379,7 @@ export default function Home() {
                   {["all","INFO","WARNING","ERROR"].map(l => <button key={l} className={`btn btn-sm btn-secondary${logLevel===l?" active":""}`} onClick={() => setLogLevelState(l)}>{l==="all"?"Все":l}</button>)}
                 </div>
                 <button className="btn btn-sm btn-secondary" onClick={loadLogs}><svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Обновить</button>
-                <button className="btn btn-sm btn-danger" onClick={async () => { if (!confirm("Очистить все логи?")) return; try { await apiFetch("/api/logs", { method: "DELETE" }); setLogs([]); toast("Логи очищены"); } catch { toast("Ошибка очистки логов"); } }}><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Очистить</button>
+                <button className="btn btn-sm btn-danger" onClick={() => openConfirmDialog("Очистить все логи?", "Все логи", async () => { try { await apiFetch("/api/logs", { method: "DELETE" }); setLogs([]); toast("Логи очищены", "success"); } catch { toast("Ошибка очистки логов", "error"); } })}><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Очистить</button>
               </div>
               <div className="log-viewer">
                 {logs.length===0 ? <div className="empty-state"><p>Нет логов</p></div> :
@@ -1350,7 +1406,7 @@ export default function Home() {
         <div className="form-group"><label className="form-label">Текущие изображения</label>
           <div className="file-previews">
             {editExistingImages.length===0?<span style={{color:"var(--text-muted)",fontSize:14}}>Нет изображений</span>:
-              editExistingImages.map(img => <div key={img} className="file-preview"><img src={img} alt=""/><button className="remove-file" onClick={()=>deleteExistingImage(img)}>&times;</button></div>)}
+              editExistingImages.map(img => <div key={img} className="file-preview"><Image src={img} alt="" fill sizes="120px" unoptimized style={{objectFit:"cover"}}/><button className="remove-file" onClick={()=>deleteExistingImage(img)}>&times;</button></div>)}
           </div>
         </div>
         <div className="form-group"><label className="form-label">Текущие видео</label>
@@ -1445,6 +1501,12 @@ function FileDropZone({files,setFiles,kind="image",label}: {files:File[];setFile
   const [dragover,setDragover] = useState(false);
   const accept = kind === "video" ? "video/*" : "image/*";
   const defaultLabel = kind === "video" ? "Видео" : "Изображения";
+
+  // Кэш ObjectURL по File: переиспользуем, чтобы избежать утечки памяти
+  // при каждом ре-рендере.
+  const previewUrls = useMemo(() => files.map((f) => URL.createObjectURL(f)), [files]);
+  useEffect(() => () => { previewUrls.forEach((u) => URL.revokeObjectURL(u)); }, [previewUrls]);
+
   const handleFiles = (fl: FileList) => {
     const filtered = Array.from(fl).filter(f => kind === "video" ? f.type.startsWith("video/") : f.type.startsWith("image/"));
     setFiles([...files, ...filtered]);
@@ -1455,15 +1517,16 @@ function FileDropZone({files,setFiles,kind="image",label}: {files:File[];setFile
       <div className={`drop-zone${dragover?" dragover":""}`} onClick={()=>inputRef.current?.click()}
         onDragEnter={e=>{e.preventDefault();setDragover(true);}} onDragOver={e=>{e.preventDefault();setDragover(true);}}
         onDragLeave={e=>{e.preventDefault();setDragover(false);}} onDrop={e=>{e.preventDefault();setDragover(false);handleFiles(e.dataTransfer.files);}}>
-        <input ref={inputRef} type="file" multiple accept={accept} onChange={e=>e.target.files&&handleFiles(e.target.files)}/>
+        <input ref={inputRef} type="file" multiple accept={accept} onChange={e=>{ if(e.target.files) handleFiles(e.target.files); e.target.value = ""; }}/>
         <p>{kind === "video" ? "Перетащите видео или нажмите" : "Перетащите изображения или нажмите"}</p>
       </div>
       {files.length>0&&<div className="file-previews">
         {files.map((f,i) => (
-          <div key={i} className="file-preview">
+          <div key={`${f.name}-${f.lastModified}-${i}`} className="file-preview">
             {kind === "video"
-              ? <video src={URL.createObjectURL(f)} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-              : <img src={URL.createObjectURL(f)} alt=""/>}
+              ? <video src={previewUrls[i]} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+              : /* eslint-disable-next-line @next/next/no-img-element */
+                <img src={previewUrls[i]} alt=""/>}
             <button className="remove-file" onClick={()=>setFiles(files.filter((_,j)=>j!==i))}>&times;</button>
             <div style={{position:"absolute",bottom:2,left:2,right:2,fontSize:10,background:"rgba(0,0,0,0.6)",color:"#fff",padding:"1px 4px",borderRadius:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
               {(f.size / (1024 * 1024)).toFixed(1)} MB

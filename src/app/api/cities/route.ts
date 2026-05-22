@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAccessToken } from "@/lib/api-auth";
-import { VKClient } from "@/lib/vk-client";
+import { requireSession } from "@/lib/api-auth";
+import { searchCities } from "@/lib/vk-discovery";
 
 export async function GET(request: NextRequest) {
-  const result = await requireAccessToken();
-  if (result.error) return result.error;
+  const auth = await requireSession();
+  if (auth.error) return auth.error;
 
   const query = request.nextUrl.searchParams.get("q") || "";
   if (!query.trim()) {
@@ -12,8 +12,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const vk = new VKClient(result.accessToken!);
-    const items = await vk.searchCities(query.trim());
+    const items = await searchCities(auth.sessionId, auth.session, query.trim());
     return NextResponse.json({ items });
   } catch {
     return NextResponse.json({ items: [] });

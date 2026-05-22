@@ -73,9 +73,9 @@ export async function GET(request: NextRequest) {
   resp.cookies.set("session_id", sessionId, {
     httpOnly: true,
     sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
     maxAge: 86400 * 30,
   });
-  // Clean up auth cookie
   resp.cookies.delete("vk_auth");
   return resp;
 }
