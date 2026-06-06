@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireSession } from "@/lib/api-auth";
-import { uploadPublishMedia } from "@/lib/vk-media-upload";
+import { uploadPublishVideos } from "@/lib/vk-media-upload";
 
 export const maxDuration = 300;
 export const runtime = "nodejs";
@@ -10,18 +10,16 @@ export async function POST(request: NextRequest) {
   if (auth.error) return auth.error;
 
   const body = await request.json().catch(() => ({}));
-  const images = Array.isArray(body.images) ? body.images.filter((u: unknown) => typeof u === "string") : [];
   const videos = Array.isArray(body.videos) ? body.videos.filter((u: unknown) => typeof u === "string") : [];
   const name = typeof body.name === "string" ? body.name : "Видео";
 
-  if (images.length === 0 && videos.length === 0) {
+  if (videos.length === 0) {
     return NextResponse.json({ attachments: [], errors: [] });
   }
 
-  const { attachments, errors } = await uploadPublishMedia(
+  const { attachments, errors } = await uploadPublishVideos(
     auth.sessionId,
     auth.session,
-    images,
     videos,
     name,
   );

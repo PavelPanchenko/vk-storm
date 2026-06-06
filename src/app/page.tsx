@@ -714,32 +714,35 @@ export default function Home() {
         return;
       }
 
-      // 2. Загрузка медиа на сервере (один IP + общий rate limiter для VK API).
+      // 2. Видео загружается один раз; фото — отдельно для каждой группы в batch.
       const hasImages = post.images && post.images.length > 0;
       const hasVideos = post.videos && post.videos.length > 0;
-      const mediaTotal = (hasImages ? post.images.length : 0) + (hasVideos ? post.videos.length : 0);
-      let sharedAttachments: string[] = [];
+      let videoAttachments: string[] = [];
 
-      progress.status = "Загрузка медиа...";
-      progress.progress = 0;
-      setPublishProgress({ ...progress });
+      if (hasVideos && !publishCancelRef.current) {
+        progress.status = "Загрузка видео...";
+        progress.progress = 0;
+        setPublishProgress({ ...progress });
 
-      if (mediaTotal > 0 && !publishCancelRef.current) {
         const mediaResp = await apiFetch("/api/publish/upload-media", {
           method: "POST",
           body: JSON.stringify({
-            images: hasImages ? post.images : [],
-            videos: hasVideos ? post.videos : [],
+            videos: post.videos,
             name: publishPost,
           }),
           signal: abortCtrl.signal,
         }) as { attachments?: string[]; errors?: string[] };
-        sharedAttachments = Array.isArray(mediaResp.attachments) ? mediaResp.attachments : [];
+        videoAttachments = Array.isArray(mediaResp.attachments) ? mediaResp.attachments : [];
         for (const err of Array.isArray(mediaResp.errors) ? mediaResp.errors : []) {
           progress.errors.push({ group: "—", error: err });
         }
-        progress.progress = 30;
-        setPublishProgress({ ...progress });
+        if (videoAttachments.length === 0) {
+          progress.status = "Не удалось загрузить видео — публикация отменена";
+          progress.done = true;
+          setPublishProgress({ ...progress });
+          setShowResults(true);
+          return;
+        }
       }
 
       if (publishCancelRef.current) {
@@ -750,18 +753,10 @@ export default function Home() {
         return;
       }
 
-      if (mediaTotal > 0 && sharedAttachments.length === 0) {
-        progress.status = "Не удалось загрузить медиа — публикация отменена";
-        progress.done = true;
-        setPublishProgress({ ...progress });
-        setShowResults(true);
-        return;
-      }
-
-      // 3. Server-side fan-out of wall.post через SSE.
+      // 3. Server-side: фото на стену каждой группы + wall.post через SSE.
       const total = validGroups.length;
-      progress.status = `Публикация (0/${total})`;
-      progress.progress = 30;
+      progress.status = hasImages ? `Фото и публикация (0/${total})` : `Публикация (0/${total})`;
+      progress.progress = hasVideos ? 10 : 0;
       setPublishProgress({ ...progress });
 
       try {
@@ -770,7 +765,8 @@ export default function Home() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             postText: post.text,
-            attachments: sharedAttachments,
+            imageUrls: hasImages ? post.images : [],
+            videoAttachments,
             groups: validGroups.map(g => ({ id: g.id, url: g.url, name: g.name })),
           }),
           signal: abortCtrl.signal,
@@ -807,8 +803,11 @@ export default function Home() {
                   progress.errors.push({ group: event.group.name, error: event.error || "Неизвестная ошибка", url: event.group.url });
                   publishResults.push({ postName: publishPost, groupUrl: event.group.url, groupName: event.group.name, success: false, error: event.error });
                 }
-                progress.status = `Публикация (${event.completed}/${event.total})`;
-                progress.progress = Math.round(30 + (event.completed / event.total) * 70);
+                progress.status = hasImages
+                  ? `Фото и публикация (${event.completed}/${event.total})`
+                  : `Публикация (${event.completed}/${event.total})`;
+                const base = hasVideos ? 10 : 0;
+                progress.progress = Math.round(base + (event.completed / event.total) * (100 - base));
                 setPublishProgress({ ...progress });
               }
             } catch {

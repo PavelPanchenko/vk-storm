@@ -34,49 +34,100 @@ export type MediaUploadResult = {
   errors: string[];
 };
 
+export type ImageBlobSource = { blob: Blob; fileName: string; source?: string };
+
+export async function preloadPublishImages(imageUrls: string[]): Promise<ImageBlobSource[]> {
+  const sources: ImageBlobSource[] = [];
+  for (const url of imageUrls) {
+    const { blob, fileName } = await loadImageBlob(url);
+    sources.push({ blob, fileName, source: url });
+  }
+  return sources;
+}
+
+async function fetchWallUploadUrl(
+  sessionId: string,
+  session: Session,
+  groupId?: number,
+): Promise<{ uploadUrl: string; session: Session }> {
+  const params: Record<string, string | number> = {};
+  if (groupId != null) params.group_id = groupId;
+
+  const serverCall = await vkMethod(sessionId, session, "photos.getWallUploadServer", params);
+  let currentSession = serverCall.session;
+  const serverData = serverCall.data;
+  if (serverData.error) {
+    throw new Error(`Error ${serverData.error.error_code}: ${serverData.error.error_msg}`);
+  }
+  const uploadUrl = (serverData.response as Record<string, unknown>)?.upload_url as string;
+  if (!uploadUrl) throw new Error("photos.getWallUploadServer: нет upload_url");
+  return { uploadUrl, session: currentSession };
+}
+
+async function postPhotoToVkUploadServer(
+  uploadUrl: string,
+  blob: Blob,
+  fileName: string,
+): Promise<Record<string, unknown>> {
+  const formData = new FormData();
+  formData.append("photo", blob, fileName);
+  const uploadResp = await fetch(uploadUrl, { method: "POST", body: formData });
+  const uploadResult = (await uploadResp.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!uploadResp.ok) {
+    const err = new Error(
+      `Ошибка загрузки на сервер VK: HTTP ${uploadResp.status}${uploadResult.error ? ` — ${String(uploadResult.error)}` : ""}`,
+    );
+    (err as Error & { status?: number }).status = uploadResp.status;
+    throw err;
+  }
+  return uploadResult;
+}
+
+/** Загрузка фото на стену: с group_id — вложения для конкретного сообщества. */
 export async function uploadWallPhotosForPublish(
   sessionId: string,
   session: Session,
-  imageUrls: string[],
+  imageSources: ImageBlobSource[],
+  groupId?: number,
 ): Promise<MediaUploadResult & { session: Session }> {
   const attachments: string[] = [];
   const errors: string[] = [];
   let currentSession = session;
 
-  for (let i = 0; i < imageUrls.length; i++) {
+  for (let i = 0; i < imageSources.length; i++) {
     if (i > 0) await sleep(BETWEEN_IMAGES_MS);
-    const url = imageUrls[i];
+    const { blob, fileName, source } = imageSources[i];
     try {
-      const serverCall = await vkMethod(sessionId, currentSession, "photos.getWallUploadServer", {});
-      currentSession = serverCall.session;
-      const serverData = serverCall.data;
-      if (serverData.error) {
-        throw new Error(`Error ${serverData.error.error_code}: ${serverData.error.error_msg}`);
-      }
-      const uploadUrl = (serverData.response as Record<string, unknown>)?.upload_url as string;
-      if (!uploadUrl) throw new Error("photos.getWallUploadServer: нет upload_url");
+      let uploadResult: Record<string, unknown> | null = null;
 
-      await sleep(BETWEEN_VK_STEPS_MS);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const { uploadUrl, session: ns } = await fetchWallUploadUrl(sessionId, currentSession, groupId);
+        currentSession = ns;
+        await sleep(BETWEEN_VK_STEPS_MS);
 
-      const { blob, fileName } = await loadImageBlob(url);
-      const formData = new FormData();
-      formData.append("photo", blob, fileName);
-      const uploadResp = await fetch(uploadUrl, { method: "POST", body: formData });
-      const uploadResult = (await uploadResp.json().catch(() => ({}))) as Record<string, unknown>;
-      if (!uploadResp.ok) {
-        throw new Error(
-          `Ошибка загрузки на сервер VK: HTTP ${uploadResp.status}${uploadResult.error ? ` — ${String(uploadResult.error)}` : ""}`,
-        );
+        try {
+          uploadResult = await postPhotoToVkUploadServer(uploadUrl, blob, fileName);
+          break;
+        } catch (e) {
+          const status = (e as Error & { status?: number }).status;
+          if (status === 405 && attempt === 0) {
+            appendLog("WARNING", `VK upload HTTP 405, retry with fresh upload_url (group ${groupId ?? "user"})`);
+            await sleep(BETWEEN_VK_STEPS_MS);
+            continue;
+          }
+          throw e;
+        }
       }
+
+      if (!uploadResult) throw new Error("Не удалось загрузить фото на сервер VK");
       const { server, photo, hash } = parseVkPhotoUploadResult(uploadResult);
 
       await sleep(BETWEEN_VK_STEPS_MS);
 
-      const saveCall = await vkMethod(sessionId, currentSession, "photos.saveWallPhoto", {
-        server,
-        photo,
-        hash,
-      });
+      const saveParams: Record<string, string | number> = { server, photo, hash };
+      if (groupId != null) saveParams.group_id = groupId;
+
+      const saveCall = await vkMethod(sessionId, currentSession, "photos.saveWallPhoto", saveParams);
       currentSession = saveCall.session;
       const saveData = saveCall.data;
       if (saveData.error) {
@@ -85,11 +136,11 @@ export async function uploadWallPhotosForPublish(
       const attachment = photoAttachmentFromSaveResponse(saveData.response);
       if (!attachment) throw new Error("photos.saveWallPhoto: пустой ответ");
       attachments.push(attachment);
-      appendLog("INFO", `Uploaded wall photo for publish: ${url}`);
+      appendLog("INFO", `Uploaded wall photo for publish${groupId != null ? ` (group ${groupId})` : ""}: ${source ?? fileName}`);
     } catch (e) {
       const msg = (e as Error).message || String(e);
       errors.push(`Фото ${i + 1}: ${msg}`);
-      appendLog("ERROR", `Publish photo upload failed (${url}): ${msg}`);
+      appendLog("ERROR", `Publish photo upload failed (${source ?? fileName}): ${msg}`);
     }
   }
 
@@ -186,20 +237,18 @@ export async function uploadWallVideoForPublish(
   return { attachment: `video${ownerId}_${videoId}`, session: nextSession };
 }
 
-export async function uploadPublishMedia(
+export async function uploadPublishVideos(
   sessionId: string,
   session: Session,
-  imageUrls: string[],
   videoUrls: string[],
   videoName: string,
-): Promise<MediaUploadResult> {
-  const photoResult = await uploadWallPhotosForPublish(sessionId, session, imageUrls);
-  const attachments = [...photoResult.attachments];
-  const errors = [...photoResult.errors];
-  let currentSession = photoResult.session;
+): Promise<MediaUploadResult & { session: Session }> {
+  const attachments: string[] = [];
+  const errors: string[] = [];
+  let currentSession = session;
 
   for (let i = 0; i < videoUrls.length; i++) {
-    if (i > 0 || imageUrls.length > 0) await sleep(BETWEEN_IMAGES_MS);
+    if (i > 0) await sleep(BETWEEN_IMAGES_MS);
     try {
       const videoResult = await uploadWallVideoForPublish(sessionId, currentSession, videoUrls[i], videoName);
       currentSession = videoResult.session;
@@ -211,5 +260,5 @@ export async function uploadPublishMedia(
     }
   }
 
-  return { attachments, errors };
+  return { attachments, errors, session: currentSession };
 }

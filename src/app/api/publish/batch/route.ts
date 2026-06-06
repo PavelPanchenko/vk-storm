@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { requireSession } from "@/lib/api-auth";
 import { fetchGroupMembershipMap } from "@/lib/vk-batch-membership";
+import { preloadPublishImages, uploadWallPhotosForPublish } from "@/lib/vk-media-upload";
 import { vkMethod } from "@/lib/vk-method";
 
 export const maxDuration = 300;
@@ -10,7 +11,12 @@ const BATCH_WALL_POST_CONCURRENCY = 1;
 const BETWEEN_GROUPS_MS = 650;
 
 type Group = { id: number; url: string; name: string };
-type BatchBody = { postText: string; attachments: string[]; groups: Group[] };
+type BatchBody = {
+  postText: string;
+  groups: Group[];
+  imageUrls?: string[];
+  videoAttachments?: string[];
+};
 
 type ProgressEvent =
   | { type: "started"; total: number }
@@ -31,7 +37,10 @@ export async function POST(request: NextRequest) {
 
   const body = (await request.json().catch(() => ({}))) as Partial<BatchBody>;
   const postText = typeof body.postText === "string" ? body.postText : "";
-  const attachments = Array.isArray(body.attachments) ? body.attachments.filter((a) => typeof a === "string") : [];
+  const imageUrls = Array.isArray(body.imageUrls) ? body.imageUrls.filter((u) => typeof u === "string") : [];
+  const videoAttachments = Array.isArray(body.videoAttachments)
+    ? body.videoAttachments.filter((a) => typeof a === "string")
+    : [];
   const groups = Array.isArray(body.groups)
     ? body.groups.filter((g) => g && typeof g.id === "number" && typeof g.url === "string")
     : [];
@@ -78,15 +87,36 @@ export async function POST(request: NextRequest) {
       );
       let currentSession = sessionAfterCheck;
 
-      const publishOne = async (g: Group) => {
-        const postParams: Record<string, string> = { owner_id: String(-g.id), message: postText };
-        if (attachments.length > 0) postParams.attachments = attachments.join(",");
+      const imageSources = imageUrls.length > 0 ? await preloadPublishImages(imageUrls) : [];
 
+      const publishOne = async (g: Group) => {
         let errMsg: string | null = null;
+        const groupAttachments = [...videoAttachments];
 
         if (!membership.get(g.id)) {
           errMsg = "Аккаунт VK не подписан на это сообщество";
-        } else {
+        } else if (imageSources.length > 0) {
+          const photoResult = await uploadWallPhotosForPublish(
+            auth.sessionId,
+            currentSession,
+            imageSources,
+            g.id,
+          );
+          currentSession = photoResult.session;
+          if (
+            photoResult.errors.length > 0 ||
+            photoResult.attachments.length !== imageSources.length
+          ) {
+            errMsg = photoResult.errors.join("; ") || "Не удалось загрузить фото для этой группы";
+          } else {
+            groupAttachments.push(...photoResult.attachments);
+          }
+        }
+
+        if (!errMsg) {
+          const postParams: Record<string, string> = { owner_id: String(-g.id), message: postText };
+          if (groupAttachments.length > 0) postParams.attachments = groupAttachments.join(",");
+
           const { data, session: ns } = await vkMethod(auth.sessionId, currentSession, "wall.post", postParams);
           currentSession = ns;
           if (data.error) {
