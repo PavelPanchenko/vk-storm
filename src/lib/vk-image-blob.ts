@@ -1,6 +1,10 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname } from "node:path";
+import sharp from "sharp";
 import { resolveUploadPath } from "./storage";
+
+const MAX_UPLOAD_BYTES = 2_500_000;
+const MAX_SIDE_PX = 2560;
 
 const IMAGE_MIME: Record<string, string> = {
   ".jpg": "image/jpeg",
@@ -29,6 +33,34 @@ export async function loadImageBlob(imageUrl: string): Promise<{ blob: Blob; fil
   const contentType = imgResp.headers.get("content-type") || "image/jpeg";
   const ext = contentType.includes("png") ? "png" : "jpg";
   return { blob: new Blob([fileData], { type: contentType }), fileName: `photo.${ext}` };
+}
+
+/** Уменьшает тяжёлые фото перед upload на VK — снижает риск HTTP 504. */
+export async function optimizeImageForVkUpload(
+  blob: Blob,
+  fileName: string,
+): Promise<{ blob: Blob; fileName: string }> {
+  if (blob.type === "image/gif") return { blob, fileName };
+
+  const buf = Buffer.from(await blob.arrayBuffer());
+  try {
+    const meta = await sharp(buf).metadata();
+    const w = meta.width ?? 0;
+    const h = meta.height ?? 0;
+    if (buf.length <= MAX_UPLOAD_BYTES && w <= MAX_SIDE_PX && h <= MAX_SIDE_PX) {
+      return { blob, fileName };
+    }
+
+    const out = await sharp(buf)
+      .rotate()
+      .resize({ width: MAX_SIDE_PX, height: MAX_SIDE_PX, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+    const base = fileName.replace(/\.[^.]+$/, "") || "photo";
+    return { blob: new Blob([out], { type: "image/jpeg" }), fileName: `${base}.jpg` };
+  } catch {
+    return { blob, fileName };
+  }
 }
 
 export function parseVkPhotoUploadResult(uploadResult: Record<string, unknown>): {

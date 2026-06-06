@@ -8,6 +8,7 @@ import { resolveUploadPath } from "./storage";
 import { vkMethod } from "./vk-method";
 import {
   loadImageBlob,
+  optimizeImageForVkUpload,
   parseVkPhotoUploadResult,
   photoAttachmentFromSaveResponse,
 } from "./vk-image-blob";
@@ -28,6 +29,13 @@ function sleep(ms: number): Promise<void> {
 
 const BETWEEN_IMAGES_MS = 500;
 const BETWEEN_VK_STEPS_MS = 450;
+const UPLOAD_FETCH_TIMEOUT_MS = 120_000;
+const MAX_UPLOAD_ATTEMPTS = 4;
+const RETRYABLE_UPLOAD_STATUS = new Set([405, 408, 429, 502, 503, 504]);
+
+function uploadRetryDelay(attempt: number): number {
+  return 800 * (attempt + 1) + Math.floor(Math.random() * 400);
+}
 
 export type MediaUploadResult = {
   attachments: string[];
@@ -39,7 +47,8 @@ export type ImageBlobSource = { blob: Blob; fileName: string; source?: string };
 export async function preloadPublishImages(imageUrls: string[]): Promise<ImageBlobSource[]> {
   const sources: ImageBlobSource[] = [];
   for (const url of imageUrls) {
-    const { blob, fileName } = await loadImageBlob(url);
+    const loaded = await loadImageBlob(url);
+    const { blob, fileName } = await optimizeImageForVkUpload(loaded.blob, loaded.fileName);
     sources.push({ blob, fileName, source: url });
   }
   return sources;
@@ -71,7 +80,11 @@ async function postPhotoToVkUploadServer(
 ): Promise<Record<string, unknown>> {
   const formData = new FormData();
   formData.append("photo", blob, fileName);
-  const uploadResp = await fetch(uploadUrl, { method: "POST", body: formData });
+  const uploadResp = await fetch(uploadUrl, {
+    method: "POST",
+    body: formData,
+    signal: AbortSignal.timeout(UPLOAD_FETCH_TIMEOUT_MS),
+  });
   const uploadResult = (await uploadResp.json().catch(() => ({}))) as Record<string, unknown>;
   if (!uploadResp.ok) {
     const err = new Error(
@@ -89,18 +102,21 @@ export async function uploadWallPhotosForPublish(
   session: Session,
   imageSources: ImageBlobSource[],
   groupId?: number,
+  isAborted?: () => boolean,
 ): Promise<MediaUploadResult & { session: Session }> {
   const attachments: string[] = [];
   const errors: string[] = [];
   let currentSession = session;
 
   for (let i = 0; i < imageSources.length; i++) {
+    if (isAborted?.()) break;
     if (i > 0) await sleep(BETWEEN_IMAGES_MS);
     const { blob, fileName, source } = imageSources[i];
     try {
       let uploadResult: Record<string, unknown> | null = null;
 
-      for (let attempt = 0; attempt < 2; attempt++) {
+      for (let attempt = 0; attempt < MAX_UPLOAD_ATTEMPTS; attempt++) {
+        if (isAborted?.()) break;
         const { uploadUrl, session: ns } = await fetchWallUploadUrl(sessionId, currentSession, groupId);
         currentSession = ns;
         await sleep(BETWEEN_VK_STEPS_MS);
@@ -110,9 +126,16 @@ export async function uploadWallPhotosForPublish(
           break;
         } catch (e) {
           const status = (e as Error & { status?: number }).status;
-          if (status === 405 && attempt === 0) {
-            appendLog("WARNING", `VK upload HTTP 405, retry with fresh upload_url (group ${groupId ?? "user"})`);
-            await sleep(BETWEEN_VK_STEPS_MS);
+          const isTimeout = e instanceof Error && e.name === "TimeoutError";
+          const retryable =
+            isTimeout || (status != null && RETRYABLE_UPLOAD_STATUS.has(status));
+          if (retryable && attempt < MAX_UPLOAD_ATTEMPTS - 1) {
+            const reason = isTimeout ? "timeout" : `HTTP ${status}`;
+            appendLog(
+              "WARNING",
+              `VK upload ${reason}, retry ${attempt + 2}/${MAX_UPLOAD_ATTEMPTS} (group ${groupId ?? "user"})`,
+            );
+            await sleep(uploadRetryDelay(attempt));
             continue;
           }
           throw e;

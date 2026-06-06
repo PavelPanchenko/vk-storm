@@ -90,6 +90,8 @@ export async function POST(request: NextRequest) {
       const imageSources = imageUrls.length > 0 ? await preloadPublishImages(imageUrls) : [];
 
       const publishOne = async (g: Group) => {
+        if (closed) return;
+
         let errMsg: string | null = null;
         const groupAttachments = [...videoAttachments];
 
@@ -101,8 +103,10 @@ export async function POST(request: NextRequest) {
             currentSession,
             imageSources,
             g.id,
+            () => closed,
           );
           currentSession = photoResult.session;
+          if (closed) return;
           if (
             photoResult.errors.length > 0 ||
             photoResult.attachments.length !== imageSources.length
@@ -113,7 +117,7 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        if (!errMsg) {
+        if (!errMsg && !closed) {
           const postParams: Record<string, string> = { owner_id: String(-g.id), message: postText };
           if (groupAttachments.length > 0) postParams.attachments = groupAttachments.join(",");
 
