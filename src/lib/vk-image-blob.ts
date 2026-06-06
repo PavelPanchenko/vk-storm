@@ -57,7 +57,7 @@ export async function optimizeImageForVkUpload(
       .jpeg({ quality: 85 })
       .toBuffer();
     const base = fileName.replace(/\.[^.]+$/, "") || "photo";
-    return { blob: new Blob([out], { type: "image/jpeg" }), fileName: `${base}.jpg` };
+    return { blob: new Blob([new Uint8Array(out)], { type: "image/jpeg" }), fileName: `${base}.jpg` };
   } catch {
     return { blob, fileName };
   }
