@@ -79,24 +79,29 @@ export function parseVkPhotoUploadResult(uploadResult: Record<string, unknown>):
   photo: string;
   hash: string;
 } {
-  const photo = uploadResult.photo;
-  if (!photo || photo === "[]") {
+  const payload = uploadResult.photo;
+  const photo = Array.isArray(payload) ? JSON.stringify(payload) : typeof payload === "string" ? payload : "";
+  if (!photo.trim() || /^\[\s*\]$/.test(photo.trim())) {
     throw new Error("VK upload server вернул пустой photo");
   }
-  const server = uploadResult.server;
-  const hash = uploadResult.hash;
-  if (server == null || hash == null) {
+  const { server, hash } = uploadResult;
+  const serverId = typeof server === "number" || typeof server === "string" ? String(server) : "";
+  if (!/^\d+$/.test(serverId) || typeof hash !== "string" || !hash.trim()) {
     throw new Error("Неполный ответ VK upload server");
   }
-  return { server: String(server), photo: String(photo), hash: String(hash) };
+  return { server: serverId, photo, hash };
 }
 
 export function photoAttachmentFromSaveResponse(saved: unknown): string | null {
-  const savedArr = Array.isArray(saved)
-    ? saved
-    : ((saved as Record<string, unknown>)?.items as unknown[] | undefined) || [];
-  if (savedArr.length === 0) return null;
-  const photo = savedArr[0] as Record<string, unknown>;
-  if (photo.owner_id == null || photo.id == null) return null;
-  return `photo${photo.owner_id}_${photo.id}`;
+  const items = Array.isArray(saved) ? saved : (saved as { items?: unknown } | null)?.items;
+  const photo = Array.isArray(items) ? items[0] : null;
+  if (!photo || typeof photo !== "object") return null;
+
+  const { owner_id: ownerId, id, access_key: accessKey } = photo as Record<string, unknown>;
+  const owner = typeof ownerId === "number" || typeof ownerId === "string" ? String(ownerId) : "";
+  const photoId = typeof id === "number" || typeof id === "string" ? String(id) : "";
+  if (!/^-?[1-9]\d*$/.test(owner) || !/^[1-9]\d*$/.test(photoId)) return null;
+
+  const key = typeof accessKey === "string" ? accessKey.trim() : "";
+  return `photo${owner}_${photoId}${key ? `_${key}` : ""}`;
 }

@@ -1186,7 +1186,9 @@ export default function Home() {
               const joined = Number((res as { joined?: number }).joined || 0);
               const requested = Number((res as { requested?: number }).requested || 0);
               const failed = Number((res as { failed?: number }).failed || 0);
-              toast(`Подписка: вступил ${joined}, заявок ${requested}, ошибок ${failed}`, failed > 0 ? "warning" : "success");
+              const next = requested > 0 ? " После одобрения заявки повторите отправку из истории." :
+                joined > 0 ? " Повторите отправку из истории." : "";
+              toast(`Вступили: ${joined}, заявок: ${requested}, ошибок: ${failed}.${next}`, failed > 0 ? "warning" : "success");
               setShowSubscribeAllPrompt(false);
             } catch (e) {
               toast(`Ошибка подписки: ${(e as Error).message}`, "error");

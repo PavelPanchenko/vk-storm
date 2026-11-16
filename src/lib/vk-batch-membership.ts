@@ -3,13 +3,11 @@ import { vkMethod } from "./vk-method";
 
 const EXECUTE_BATCH = 25;
 
-function isMemberValue(response: unknown): boolean {
-  if (typeof response === "number") return response === 1;
-  if (response && typeof response === "object" && "member" in response) {
-    const member = (response as { member?: unknown }).member;
-    return member === 1 || member === true;
-  }
-  return false;
+export function parseVkMembership(response: unknown): boolean | undefined {
+  const member = response && typeof response === "object" && "member" in response ? response.member : response;
+  if (member === 1 || member === true) return true;
+  if (member === 0 || member === false) return false;
+  return undefined;
 }
 
 /**
@@ -30,19 +28,24 @@ export async function fetchGroupMembershipMap(
   for (let i = 0; i < groupIds.length; i += EXECUTE_BATCH) {
     const batch = groupIds.slice(i, i + EXECUTE_BATCH);
     const lines = batch.map(
-      (gid) => `results.push(API.groups.isMember({"group_id":${gid},"user_id":"${userId}"}));`,
+      (gid) => `results.push(API.groups.isMember(${JSON.stringify({ group_id: gid, user_id: userId })}));`,
     );
     const code = `var results = [];\n${lines.join("\n")}\nreturn results;`;
 
-    const { data, session: nextSession } = await vkMethod(sessionId, currentSession, "execute", { code });
-    currentSession = nextSession;
-    if (data.error) {
-      continue;
+    try {
+      const { data, session: nextSession } = await vkMethod(sessionId, currentSession, "execute", { code });
+      currentSession = nextSession;
+      if (data.error || !Array.isArray(data.response)) continue;
+      const items: unknown[] = data.response;
+      batch.forEach((gid, j) => {
+        // execute uses false to mark a failed API call; groups.isMember returns 0.
+        if (items[j] === false) return;
+        const member = parseVkMembership(items[j]);
+        if (member !== undefined) map.set(gid, member);
+      });
+    } catch (error) {
+      console.warn("VK membership lookup failed", error instanceof Error ? error.name : "UnknownError");
     }
-    const items = Array.isArray(data.response) ? data.response : [];
-    batch.forEach((gid, j) => {
-      if (items[j] !== false && items[j] != null) map.set(gid, isMemberValue(items[j]));
-    });
   }
 
   return { map, session: currentSession };

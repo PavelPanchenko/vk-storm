@@ -15,7 +15,33 @@ import type { PublishEvent, PublishStatus } from "@/lib/publish-status";
 
 export const maxDuration = 300;
 
-type VkGroup = { id: number; name: string; screen_name: string };
+type VkGroup = {
+  id: number;
+  name: string;
+  screen_name: string;
+  can_post?: 0 | 1 | boolean;
+  can_suggest?: 0 | 1 | boolean;
+};
+
+function shouldSuggest(group: VkGroup, errorCode: number | undefined): boolean {
+  if (group.can_suggest === 0 || group.can_suggest === false) return false;
+  if (errorCode === 214) return true;
+  // A generic access error can also come from media or token permissions.
+  return errorCode === 15
+    && (group.can_post === 0 || group.can_post === false)
+    && (group.can_suggest === 1 || group.can_suggest === true);
+}
+const membershipRequired = "Аккаунт VK не подписан на это сообщество. Вступите и проверьте доступ к публикации.";
+
+function requiresMembership(message: string): boolean {
+  return /not a member|must (?:join|subscribe)|вступите в|подпишитесь на|не подписан/i.test(message);
+}
+
+function lacksBothPublishPermissions(group: VkGroup): boolean {
+  return (group.can_post === 0 || group.can_post === false)
+    && (group.can_suggest === 0 || group.can_suggest === false);
+}
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export async function POST(request: Request) {
@@ -127,7 +153,10 @@ export async function POST(request: Request) {
         if (disconnected) return;
         const keys = [...new Set(targets.map(({ url }) => vkGroupPathKey(url)).filter(Boolean))];
         for (let i = 0; i < keys.length && !disconnected; i += 100) {
-          const response = await vkMethod(auth.sessionId, session, "groups.getById", { group_ids: keys.slice(i, i + 100).join(",") });
+          const response = await vkMethod(auth.sessionId, session, "groups.getById", {
+            group_ids: keys.slice(i, i + 100).join(","),
+            fields: "can_post,can_suggest",
+          });
           session = response.session;
           if (response.data.error) throw new Error(response.data.error.error_msg);
           const payload = response.data.response as VkGroup[] | { groups?: VkGroup[] } | undefined;
@@ -148,7 +177,8 @@ export async function POST(request: Request) {
         session = membership.session;
         if (disconnected) return;
 
-        const hasEligibleTargets = resolvedTargets.some(({ group }) => group && membership.map.get(group.id));
+        const hasEligibleTargets = resolvedTargets.some(({ group }) => group
+          && !(membership.map.get(group.id) === false && lacksBothPublishPermissions(group)));
         const images = hasEligibleTargets ? await preloadPublishImages(post.images) : [];
         let videos: string[] = [];
         if (hasEligibleTargets && post.videos.length > 0 && !disconnected) {
@@ -172,9 +202,9 @@ export async function POST(request: Request) {
             continue;
           }
           handled.add(id);
-          if (!membership.map.get(id)) {
-            const message = membership.map.has(id) ? "Аккаунт VK не подписан на это сообщество" : "VK не подтвердил подписку";
-            await finish(url, name, "failed", message);
+          const isMember = membership.map.get(id);
+          if (isMember === false && lacksBothPublishPermissions(group)) {
+            await finish(url, name, "failed", membershipRequired);
             continue;
           }
 
@@ -184,7 +214,8 @@ export async function POST(request: Request) {
             session = photos.session;
             if (disconnected) break;
             if (photos.errors.length || photos.attachments.length !== images.length) {
-              await finish(url, name, "failed", photos.errors.join("; ") || "Не удалось загрузить фото");
+              const message = photos.errors.join("; ") || "Не удалось загрузить фото";
+              await finish(url, name, "failed", isMember !== true && requiresMembership(message) ? membershipRequired : message);
               continue;
             }
             attachments.push(...photos.attachments);
@@ -206,7 +237,7 @@ export async function POST(request: Request) {
           try {
             reply = await vkMethod(auth.sessionId, session, "wall.post", params);
             session = reply.session;
-            if (!disconnected && [1051, 15, 214].includes(reply.data.error?.error_code ?? 0)) {
+            if (!disconnected && shouldSuggest(group, reply.data.error?.error_code)) {
               await sleep(400);
               if (!disconnected) {
                 suggested = true;
@@ -221,13 +252,18 @@ export async function POST(request: Request) {
 
           if (reply.data.error) {
             const { error_code, error_msg } = reply.data.error;
-            await finishDelivery(error_code === 10 ? "unknown" : "failed", `VK ${error_code}: ${error_msg}`);
-          } else if (reply.data.response != null) {
-            const postId = (reply.data.response as { post_id?: number }).post_id;
-            const postUrl = !suggested && Number.isSafeInteger(postId) ? `https://vk.com/wall-${id}_${postId}` : undefined;
-            await finishDelivery(suggested ? "suggested" : "published", undefined, postUrl);
+            const membershipDenied = isMember !== true && requiresMembership(error_msg)
+              || isMember === false && error_code === 214;
+            await finishDelivery(error_code === 10 ? "unknown" : "failed",
+              membershipDenied ? membershipRequired : `VK ${error_code}: ${error_msg}`);
           } else {
-            await finishDelivery("unknown", "VK не подтвердил результат отправки");
+            const postId = (reply.data.response as { post_id?: unknown } | undefined)?.post_id;
+            if (typeof postId === "number" && Number.isSafeInteger(postId) && postId > 0) {
+              const postUrl = suggested ? undefined : `https://vk.com/wall-${id}_${postId}`;
+              await finishDelivery(suggested ? "suggested" : "published", undefined, postUrl);
+            } else {
+              await finishDelivery("unknown", "VK не вернул ID записи");
+            }
           }
           if (!disconnected && completed < total) await sleep(650);
         }

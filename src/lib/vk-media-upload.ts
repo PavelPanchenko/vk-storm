@@ -186,6 +186,32 @@ export async function uploadWallPhotosForPublish(
   return { attachments, errors, session: currentSession };
 }
 
+function videoUploadObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function confirmVkVideoUpload(value: unknown, expectedOwnerId: number, expectedVideoId: number) {
+  const envelope = videoUploadObject(value);
+  const upload = videoUploadObject(envelope?.response) ?? envelope;
+  if (!upload || envelope?.error || envelope?.error_code || upload.error || upload.error_code || upload.success === false || upload.success === 0) {
+    throw new Error("Сервер загрузки VK не подтвердил приём видео");
+  }
+
+  if (upload.owner_id != null && upload.owner_id !== expectedOwnerId && upload.owner_id !== String(expectedOwnerId)) {
+    throw new Error("Сервер загрузки VK вернул другого владельца видео");
+  }
+  if (upload.video_id != null && upload.video_id !== expectedVideoId && upload.video_id !== String(expectedVideoId)) {
+    throw new Error("Сервер загрузки VK вернул другой ID видео");
+  }
+
+  const size = typeof upload.size === "number" || typeof upload.size === "string" ? Number(upload.size) : undefined;
+  const hasVideoId = upload.video_id != null;
+  const hasHashAndSize = typeof upload.video_hash === "string" && Boolean(upload.video_hash.trim()) && size !== undefined && size > 0;
+  if ((size !== undefined && (!Number.isSafeInteger(size) || size <= 0)) || (!hasVideoId && !hasHashAndSize)) {
+    throw new Error("Сервер загрузки VK не подтвердил приём видео");
+  }
+}
+
 export async function uploadWallVideoForPublish(
   sessionId: string,
   session: Session,
@@ -199,11 +225,13 @@ export async function uploadWallVideoForPublish(
   if (saveData.error) {
     throw new Error(`video.save: ${saveData.error.error_msg}`);
   }
-  const resp = saveData.response as { upload_url?: string; owner_id?: number; video_id?: number } | undefined;
+  const resp = saveData.response as { upload_url?: string; owner_id?: number; video_id?: number; access_key?: string } | undefined;
   const uploadUrl = resp?.upload_url;
   const ownerId = resp?.owner_id;
   const videoId = resp?.video_id;
-  if (!uploadUrl || !ownerId || !videoId) {
+  if (typeof uploadUrl !== "string" || !uploadUrl ||
+      typeof ownerId !== "number" || !Number.isSafeInteger(ownerId) || ownerId === 0 ||
+      typeof videoId !== "number" || !Number.isSafeInteger(videoId) || videoId <= 0) {
     throw new Error("video.save: неполный ответ");
   }
 
@@ -277,11 +305,13 @@ export async function uploadWallVideoForPublish(
     duplex: "half",
   });
   if (!uploadResp.ok) {
-    const txt = await uploadResp.text().catch(() => "");
-    throw new Error(`Ошибка загрузки видео в VK: ${uploadResp.status} ${txt}`.slice(0, 300));
+    await uploadResp.body?.cancel().catch(() => {});
+    throw new Error(`Ошибка загрузки видео в VK: HTTP ${uploadResp.status}`);
   }
 
-  return { attachment: `video${ownerId}_${videoId}`, session: nextSession };
+  confirmVkVideoUpload(await uploadResp.json().catch(() => null), ownerId, videoId);
+  const accessKey = typeof resp?.access_key === "string" ? resp.access_key.trim() : "";
+  return { attachment: `video${ownerId}_${videoId}${accessKey ? `_${accessKey}` : ""}`, session: nextSession };
 }
 
 export async function uploadPublishVideos(

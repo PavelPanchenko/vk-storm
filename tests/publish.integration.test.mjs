@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { upload } from "@vercel/blob/client";
+import sharp from "sharp";
 
 const database = process.env.VKSTORM_TEST_DATABASE_URL;
 const originFile = new URL("../", import.meta.url);
@@ -51,7 +52,10 @@ test("публикации, отмена и изоляция аккаунтов"
     values ('1', 'https://vk.com/club101'), ('1', 'https://vk.com/club102'),
            ('1', 'https://vk.com/club103'), ('1', 'https://vk.com/club104'),
            ('1', 'https://vk.com/club201'), ('1', 'https://vk.com/club202'),
-           ('2', 'https://vk.com/club301') returning id, url`;
+           ('2', 'https://vk.com/club301'), ('1', 'https://vk.com/club105'),
+           ('1', 'https://vk.com/club106'), ('1', 'https://vk.com/club107'),
+           ('1', 'https://vk.com/club108'), ('1', 'https://vk.com/club109'),
+           ('1', 'https://vk.com/closed-test'), ('1', 'https://vk.com/club111') returning id, url`;
   const ids = targets.map(({ id }) => id);
   await sql`insert into posts (user_id, name, text)
     values ('1', 'Первый пост', 'Текст публикации'), ('1', 'Проверка отмены', 'Текст'),
@@ -134,6 +138,120 @@ test("публикации, отмена и изоляция аккаунтов"
     assert.deepEqual(await history("b"), []);
   });
 
+  await t.test("передаёт фото с ключом доступа и обычное фото при отправке в предложку", async () => {
+    await mkdir(join(uploads, "images"));
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: "#118844" } }).png().toBuffer();
+    for (const filename of ["private.png", "public.png"]) {
+      await sharp(png).toFile(join(uploads, "images", filename));
+    }
+
+    const postName = "Пост с фото";
+    await sql`insert into posts (user_id, name, text, images)
+      values ('1', ${postName}, 'Текст поста с фото', ARRAY['/uploads/images/private.png', '/uploads/images/public.png'])`;
+    const batchId = randomUUID();
+    const response = await request("/api/publish/batch", { body: { batchId, postName, groupIds: [ids[2]] } });
+    assert.equal(response.status, 200);
+    const events = await response.text();
+    assert.match(events, /"status":"suggested"/);
+    const batch = (await history()).find(run => run.batchId === batchId);
+    assert.equal(batch.groups[0].status, "suggested");
+  });
+
+  await t.test("помечает ответ wall.post без ID записи как неподтверждённый", async () => {
+    const batchId = randomUUID();
+    const response = await request("/api/publish/batch", {
+      body: { batchId, postName: "Первый пост", groupIds: [ids[7]] },
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /"status":"unknown"/);
+    const batch = (await history()).find(run => run.batchId === batchId);
+    assert.equal(batch.successCount, 0);
+    assert.equal(batch.canRetry, false);
+  });
+
+  await t.test("переключается на предложку только при запрете публикации на стене", async () => {
+    const batchId = randomUUID();
+    const response = await request("/api/publish/batch", {
+      body: { batchId, postName: "Первый пост", groupIds: [ids[0], ...ids.slice(8, 11)] },
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /"type":"done"/);
+    const batch = (await history()).find(run => run.batchId === batchId);
+    const statuses = Object.fromEntries(batch.groups.map(group => [group.groupUrl, group.status]));
+    assert.deepEqual(statuses, {
+      [targets[0].url]: "published",
+      [targets[8].url]: "failed",
+      [targets[9].url]: "failed",
+      [targets[10].url]: "suggested",
+    });
+  });
+
+  await t.test("предлагает вступить только там, где это нужно, и отличает вступление от заявки", async () => {
+    const batchId = randomUUID();
+    const response = await request("/api/publish/batch", {
+      body: { batchId, postName: "Первый пост", groupIds: ids.slice(11, 14) },
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /"type":"done"/);
+    const batch = (await history()).find(run => run.batchId === batchId);
+    assert.equal(batch.groups.find(group => group.groupUrl === targets[13].url).status, "published");
+    for (const { url } of targets.slice(11, 13)) {
+      const result = batch.groups.find(group => group.groupUrl === url);
+      assert.equal(result.status, "failed");
+      assert.match(result.error, /не подписан/);
+    }
+
+    const subscribe = await request("/api/groups/join-bulk", {
+      body: { urls: [targets[11].url, targets[12].url, targets[6].url] },
+    });
+    assert.equal(subscribe.status, 200);
+    const subscribed = await subscribe.json();
+    assert.deepEqual([subscribed.joined, subscribed.requested, subscribed.failed], [1, 1, 1]);
+    assert.equal(subscribed.results[1].status, "requested");
+
+    const retryId = randomUUID();
+    const retry = await request("/api/publish/batch", {
+      body: { batchId: retryId, retryOf: batchId, postName: "Первый пост" },
+    });
+    assert.equal(retry.status, 200);
+    assert.match(await retry.text(), /"type":"done"/);
+    const results = (await history()).find(run => run.batchId === retryId).groups;
+    assert.equal(results.find(group => group.groupUrl === targets[11].url).status, "published");
+    assert.equal(results.find(group => group.groupUrl === targets[12].url).status, "failed");
+    assert.equal(results.length, 2);
+  });
+
+  await t.test("проверяет подтверждение загрузки и передаёт ключ доступа к видео", async () => {
+    const video = "/uploads/videos/test.mp4";
+    await mkdir(join(uploads, "videos"));
+    await writeFile(join(uploads, "videos", "test.mp4"), "fixture video bytes");
+    await sql`insert into posts (user_id, name, text, videos) values
+      ('1', 'Видео принято', 'Успешное видео', ARRAY[${video}]),
+      ('1', 'Видео с ошибкой', 'Неотправленное видео', ARRAY[${video}])`;
+
+    for (const [postName, expected] of [["Видео принято", "published"], ["Видео с ошибкой", "skipped"]]) {
+      const batchId = randomUUID();
+      const response = await request("/api/publish/batch", { body: { batchId, postName, groupIds: [ids[0]] } });
+      assert.equal(response.status, 200);
+      await response.text();
+      const batch = (await history()).find(run => run.batchId === batchId);
+      assert.equal(batch.groups[0].status, expected);
+      if (expected === "skipped") assert.match(batch.groups[0].error, /не подтвердил приём видео/);
+    }
+
+    for (const name of ["Видео с текстом", "Видео с другим ID", "Видео с хешем"]) {
+      const response = await request("/api/publish/upload-media", { body: { videos: [video], name } });
+      assert.equal(response.status, 200);
+      const upload = await response.json();
+      if (name === "Видео с хешем") {
+        assert.deepEqual(upload.attachments, ["video1_731_test-video-key"]);
+      } else {
+        assert.deepEqual(upload.attachments, []);
+        assert.equal(upload.errors.length, 1);
+      }
+    }
+  });
+
   await t.test("сохраняет отправленную группу при обрыве и помечает оставшуюся как пропущенную", async () => {
     const batchId = randomUUID();
     const controller = new AbortController();
@@ -175,6 +293,10 @@ test("публикации, отмена и изоляция аккаунтов"
   });
 
   await t.test("изолирует журнал, статистику, группы и вложения", async () => {
+    const me = await (await request("/api/auth/me", { account: "b" })).json();
+    assert.equal(me.user_id, "2");
+    assert.equal(Object.hasOwn(me, "access_token"), false);
+    assert.equal((await request("/api/vk-upload-proxy", { body: {} })).status, 404);
     const logs = await (await request("/api/logs", { account: "b" })).json();
     assert.equal(logs.lines.length, 1);
     assert.match(logs.lines[0], /Только Борис/);
