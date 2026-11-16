@@ -152,17 +152,19 @@ export function PublishPanel({
           </div>
         </aside>
       </div>
-      {progress.status && (
-        <div className="progress-section active">
-          <div className="publish-progress-label">
-            <span className="progress-text" role="status">{progress.status}</span>
-            <span className="progress-percent">{progress.progress}%</span>
-          </div>
+      <div className={`progress-section${progress.status ? " active" : ""}`}>
+        <div className="publish-progress-label">
+          <span className="progress-text" aria-hidden="true">{progress.status}</span>
+          {progress.status && <span className="progress-percent" aria-hidden="true">{progress.progress}%</span>}
+        </div>
+        {progress.status && (
           <div className="progress-bar-track" role="progressbar" aria-label="Обработка групп" aria-valuenow={progress.progress}>
             <div className="progress-bar-fill" style={{ width: `${progress.progress}%` }} />
           </div>
-        </div>
-      )}
+        )}
+        {busy && <p className="publish-progress-note">Оставьте вкладку открытой до завершения рассылки.</p>}
+      </div>
+      <div className="publish-live-status" role="status" aria-atomic="true">{progress.status}</div>
       {progress.done && (
         <section className="results-section active" aria-labelledby="publish-results">
           <h2 id="publish-results" className="publish-section-title">Результаты</h2>
@@ -174,17 +176,18 @@ export function PublishPanel({
           </div>
           <button className="btn btn-secondary" onClick={onHistory}>Открыть историю</button>
           {progress.errors.length > 0 && (
-            <div className="error-list">
+            <ul className="error-list publish-errors" aria-label="Ошибки отправки по группам">
               {progress.errors.map((item, index) => (
-                <div className="error-card" key={`${item.url}-${index}`}>
+                <li className="error-card" key={`${item.url}-${index}`}>
                   <div className="error-card-group">{item.group}</div>
                   <div className="error-card-msg">{item.error}</div>
-                  {item.url && <a href={item.url} className="btn btn-secondary btn-sm" target="_blank" rel="noreferrer">
+                  {item.url && <a href={item.url} className="btn btn-secondary btn-sm" target="_blank" rel="noreferrer"
+                    aria-label={`${isNotSubscribed(item.error) ? "Подписаться" : "Открыть в VK"}: ${item.group}`}>
                     {isNotSubscribed(item.error) ? "Подписаться" : "Открыть в VK"}
                   </a>}
-                </div>
+                </li>
               ))}
-            </div>
+            </ul>
           )}
         </section>
       )}

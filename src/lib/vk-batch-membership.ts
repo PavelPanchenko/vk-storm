@@ -20,6 +20,7 @@ export async function fetchGroupMembershipMap(
   session: Session,
   userId: string,
   groupIds: number[],
+  signal?: AbortSignal,
 ): Promise<{ map: Map<number, boolean>; session: Session }> {
   const map = new Map<number, boolean>();
   let currentSession = session;
@@ -33,7 +34,7 @@ export async function fetchGroupMembershipMap(
     const code = `var results = [];\n${lines.join("\n")}\nreturn results;`;
 
     try {
-      const { data, session: nextSession } = await vkMethod(sessionId, currentSession, "execute", { code });
+      const { data, session: nextSession } = await vkMethod(sessionId, currentSession, "execute", { code }, signal);
       currentSession = nextSession;
       if (data.error || !Array.isArray(data.response)) continue;
       const items: unknown[] = data.response;
@@ -44,6 +45,7 @@ export async function fetchGroupMembershipMap(
         if (member !== undefined) map.set(gid, member);
       });
     } catch (error) {
+      signal?.throwIfAborted();
       console.warn("VK membership lookup failed", error instanceof Error ? error.name : "UnknownError");
     }
   }

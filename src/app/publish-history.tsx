@@ -21,7 +21,9 @@ export function PublishHistory({ batches, onRefresh, onRetry, busy, loading, err
       {error && <p role="alert" className="form-error">{error}</p>}
       {!loading && !error && batches.length === 0 && <div className="empty-state">Публикаций пока нет</div>}
       {batches.map(batch => {
-        const unsettled = batch.groups.filter(group => ["queued", "sending", "unknown"].includes(group.status)).length;
+        const pending = batch.groups.filter(group => group.status === "queued" || group.status === "sending").length;
+        const unknown = batch.groups.filter(group => group.status === "unknown").length;
+        const skipped = batch.groups.filter(group => group.status === "skipped").length;
         return (
           <details key={batch.batchId} className="history-card">
             <summary>
@@ -35,7 +37,9 @@ export function PublishHistory({ batches, onRefresh, onRetry, busy, loading, err
               <span className="history-counts">
                 <span className="history-pill history-sent">{batch.successCount} из {batch.totalGroups} отправлено</span>
                 {batch.failedCount > 0 && <span className="history-pill history-error">Ошибки: {batch.failedCount}</span>}
-                {unsettled > 0 && <span className="history-pill">Без итога: {unsettled}</span>}
+                {pending > 0 && <span className="history-pill">В работе: {pending}</span>}
+                {unknown > 0 && <span className="history-pill">Без подтверждения: {unknown}</span>}
+                {skipped > 0 && <span className="history-pill">Не отправлено: {skipped}</span>}
               </span>
               <svg className="history-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
             </summary>

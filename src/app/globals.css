@@ -785,6 +785,9 @@ dialog.modal::backdrop {
 .publish-group label input { flex-shrink: 0; }
 .publish-group a { color: var(--text-secondary); }
 .publish-progress-label { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.publish-progress-note { margin-top: 10px; font-size: 13px; color: var(--text-secondary); }
+.publish-errors { list-style: none; padding: 0; }
+.publish-live-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .error-card .btn { margin-top: 8px; }
 
 /* Application shell */

@@ -5,7 +5,7 @@ export type PublishEvent =
   | { type: "phase"; message: string }
   | { type: "result"; group: { url: string; name: string }; status: PublishStatus; error?: string; completed: number; total: number }
   | { type: "done" }
-  | { type: "interrupted" };
+  | { type: "interrupted"; message?: string };
 
 export function isRetryable(status: PublishStatus) {
   return status === "failed" || status === "skipped";

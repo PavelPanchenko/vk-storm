@@ -2,14 +2,16 @@ import { Session, updateSessionTokens, getSession } from "./sessions";
 import { refreshTokens } from "./auth";
 import { appendLog } from "./logger";
 import { vkRateLimited } from "./vk-rate-limit";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const VK_API_VERSION = "5.199";
 const MAX_TRANSIENT_RETRIES = 3;
+const VK_REQUEST_TIMEOUT_MS = 15_000;
 
 type VKError = { error_code: number; error_msg: string };
 type VKResponse = { response?: unknown; error?: VKError };
 
-async function rawCall(token: string, method: string, params: Record<string, string | number>): Promise<VKResponse> {
+async function rawCall(token: string, method: string, params: Record<string, string | number>, signal?: AbortSignal): Promise<VKResponse> {
   const form = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === null) continue;
@@ -18,11 +20,17 @@ async function rawCall(token: string, method: string, params: Record<string, str
   form.set("access_token", token);
   form.set("v", VK_API_VERSION);
 
+  const timeout = AbortSignal.timeout(VK_REQUEST_TIMEOUT_MS);
   const resp = await fetch(`https://api.vk.com/method/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: form.toString(),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
+  if (!resp.ok) {
+    await resp.body?.cancel().catch(() => {});
+    throw new Error(`VK API HTTP ${resp.status}`);
+  }
   return resp.json();
 }
 
@@ -81,13 +89,14 @@ export async function vkMethod(
   session: Session,
   method: string,
   params: Record<string, string | number>,
+  signal?: AbortSignal,
 ): Promise<{ data: VKResponse; session: Session }> {
   let currentSession = session;
   let refreshed = false;
   let data: VKResponse = {};
 
   for (let transientAttempt = 0; transientAttempt <= MAX_TRANSIENT_RETRIES; transientAttempt++) {
-    data = await vkRateLimited(sessionId, () => rawCall(currentSession.access_token, method, params));
+    data = await vkRateLimited(sessionId, () => rawCall(currentSession.access_token, method, params, signal), signal);
     const errCode = data.error?.error_code;
 
     if (errCode === 5) {
@@ -104,7 +113,7 @@ export async function vkMethod(
     if ((errCode === 10 && method !== "wall.post") || errCode === 6) {
       if (transientAttempt >= MAX_TRANSIENT_RETRIES) return { data, session: currentSession };
       await appendLog("WARNING", `VK Error ${errCode} on ${method}, retry ${transientAttempt + 1}/${MAX_TRANSIENT_RETRIES}`);
-      await new Promise(r => setTimeout(r, backoffDelay(transientAttempt)));
+      await sleep(backoffDelay(transientAttempt), undefined, { signal });
       // A sibling caller may have refreshed the token meanwhile.
       const fresh = await getSession(sessionId);
       if (fresh) currentSession = fresh;

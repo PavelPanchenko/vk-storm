@@ -14,6 +14,9 @@ import { vkMethod } from "@/lib/vk-method";
 import type { PublishEvent, PublishStatus } from "@/lib/publish-status";
 
 export const maxDuration = 300;
+const WORK_TIMEOUT_MS = 270_000;
+const deadlineMessage = "Истекло время рассылки. Неотправленные группы можно повторить из истории.";
+const groupUnavailable = "Сообщество не разрешает публикацию на стене или отправку в предложку.";
 
 type VkGroup = {
   id: number;
@@ -45,6 +48,7 @@ function lacksBothPublishPermissions(group: VkGroup): boolean {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export async function POST(request: Request) {
+  const deadline = AbortSignal.timeout(WORK_TIMEOUT_MS);
   const auth = await requireSession();
   if (auth.error) return auth.error;
   const userId = auth.session.user_id;
@@ -102,26 +106,33 @@ export async function POST(request: Request) {
   if (!claimed) return Response.json({ detail: "Этот запуск уже есть в истории" }, { status: 409 });
 
   let disconnected = request.signal.aborted;
-  const abort = () => { disconnected = true; };
+  const client = new AbortController();
+  const signal = AbortSignal.any([request.signal, client.signal, deadline]);
+  const abort = () => {
+    disconnected = true;
+    client.abort();
+  };
   const runFilter = and(eq(publishResults.batchId, batchId), eq(publishResults.userId, userId));
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       request.signal.addEventListener("abort", abort);
-      const heartbeat = setInterval(() => {
-        heartbeatPublishBatch(batchId)
-          .then(active => { if (!active) disconnected = true; })
-          .catch(error => console.error("Publish heartbeat failed", batchId, error));
-      }, 30_000);
-      heartbeat.unref();
-      const send = (event: PublishEvent) => {
+      const sendFrame = (frame: string) => {
         if (disconnected) return;
         try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode(frame));
         } catch {
-          disconnected = true;
+          abort();
         }
       };
+      const send = (event: PublishEvent) => sendFrame(`data: ${JSON.stringify(event)}\n\n`);
+      const heartbeat = setInterval(() => {
+        sendFrame(": keep-alive\n\n");
+        heartbeatPublishBatch(batchId)
+          .then(active => { if (!active) abort(); })
+          .catch(error => console.error("Publish heartbeat failed", batchId, error));
+      }, 20_000);
+      heartbeat.unref();
       let session = auth.session;
       let completed = 0;
       let sent = 0;
@@ -156,7 +167,7 @@ export async function POST(request: Request) {
           const response = await vkMethod(auth.sessionId, session, "groups.getById", {
             group_ids: keys.slice(i, i + 100).join(","),
             fields: "can_post,can_suggest",
-          });
+          }, signal);
           session = response.session;
           if (response.data.error) throw new Error(response.data.error.error_msg);
           const payload = response.data.response as VkGroup[] | { groups?: VkGroup[] } | undefined;
@@ -173,17 +184,18 @@ export async function POST(request: Request) {
           return { url, group: resolved.get(vkGroupPathKey(url)) ?? (numericId ? resolved.get(String(numericId)) : undefined) };
         });
         const membership = await fetchGroupMembershipMap(auth.sessionId, session, userId,
-          [...new Set(resolvedTargets.flatMap(({ group }) => group ? [group.id] : []))]);
+          [...new Set(resolvedTargets.flatMap(({ group }) => group ? [group.id] : []))], signal);
         session = membership.session;
         if (disconnected) return;
 
-        const hasEligibleTargets = resolvedTargets.some(({ group }) => group
-          && !(membership.map.get(group.id) === false && lacksBothPublishPermissions(group)));
-        const images = hasEligibleTargets ? await preloadPublishImages(post.images) : [];
+        const hasEligibleTargets = resolvedTargets.some(({ group }) => group && !lacksBothPublishPermissions(group));
+        if (hasEligibleTargets && post.images.length) send({ type: "phase", message: "Подготовка фото…" });
+        const images = hasEligibleTargets ? await preloadPublishImages(post.images, signal) : [];
         let videos: string[] = [];
         if (hasEligibleTargets && post.videos.length > 0 && !disconnected) {
           send({ type: "phase", message: "Загрузка видео…" });
-          const media = await uploadPublishVideos(auth.sessionId, session, post.videos, post.name);
+          const media = await uploadPublishVideos(auth.sessionId, session, post.videos, post.name, signal);
+          signal.throwIfAborted();
           if (media.errors.length) throw new Error(media.errors.join("; "));
           videos = media.attachments;
           session = media.session;
@@ -191,7 +203,7 @@ export async function POST(request: Request) {
         send({ type: "phase", message: "Отправка в сообщества…" });
 
         for (const { url, group } of resolvedTargets) {
-          if (disconnected) break;
+          signal.throwIfAborted();
           if (!group) {
             await finish(url, vkGroupPathKey(url), "failed", "VK не вернул данные сообщества");
             continue;
@@ -203,16 +215,17 @@ export async function POST(request: Request) {
           }
           handled.add(id);
           const isMember = membership.map.get(id);
-          if (isMember === false && lacksBothPublishPermissions(group)) {
-            await finish(url, name, "failed", membershipRequired);
+          if (lacksBothPublishPermissions(group)) {
+            await finish(url, name, "failed", isMember === false ? membershipRequired : groupUnavailable);
             continue;
           }
 
           const attachments = [...videos];
           if (images.length) {
-            const photos = await uploadWallPhotosForPublish(auth.sessionId, session, images, id, () => disconnected);
+            send({ type: "phase", message: `Загрузка фото для «${name}»…` });
+            const photos = await uploadWallPhotosForPublish(auth.sessionId, session, images, id, signal);
             session = photos.session;
-            if (disconnected) break;
+            signal.throwIfAborted();
             if (photos.errors.length || photos.attachments.length !== images.length) {
               const message = photos.errors.join("; ") || "Не удалось загрузить фото";
               await finish(url, name, "failed", isMember !== true && requiresMembership(message) ? membershipRequired : message);
@@ -227,21 +240,22 @@ export async function POST(request: Request) {
           }
           const finishDelivery = (status: PublishStatus, error?: string, postUrl?: string) =>
             finish(url, name, status, error, postUrl, true);
-          if (disconnected) {
+          if (signal.aborted) {
             await finishDelivery("skipped");
-            break;
+            signal.throwIfAborted();
           }
           const params = { owner_id: -id, message: post.text, ...(attachments.length ? { attachments: attachments.join(",") } : {}) };
           let reply;
           let suggested = false;
           try {
-            reply = await vkMethod(auth.sessionId, session, "wall.post", params);
+            // Let an in-flight write receive its reply when a viewer disconnects.
+            reply = await vkMethod(auth.sessionId, session, "wall.post", params, deadline);
             session = reply.session;
-            if (!disconnected && shouldSuggest(group, reply.data.error?.error_code)) {
+            if (!signal.aborted && shouldSuggest(group, reply.data.error?.error_code)) {
               await sleep(400);
-              if (!disconnected) {
+              if (!signal.aborted) {
                 suggested = true;
-                reply = await vkMethod(auth.sessionId, session, "wall.post", { ...params, suggest: 1 });
+                reply = await vkMethod(auth.sessionId, session, "wall.post", { ...params, suggest: 1 }, deadline);
                 session = reply.session;
               }
             }
@@ -273,11 +287,12 @@ export async function POST(request: Request) {
           complete = completed === total;
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Не удалось продолжить отправку";
+        if (disconnected) return;
+        const message = deadline.aborted ? deadlineMessage : error instanceof Error ? error.message : "Не удалось продолжить отправку";
         console.error("Batch publish interrupted", batchId, message);
         await db.update(publishResults).set({ error: message })
           .where(and(runFilter, eq(publishResults.status, "queued")));
-        send({ type: "interrupted" });
+        send({ type: "interrupted", message });
       } finally {
         clearInterval(heartbeat);
         try {

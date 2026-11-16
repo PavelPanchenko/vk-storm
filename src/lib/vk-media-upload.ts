@@ -2,6 +2,7 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { extname } from "node:path";
 import { Readable } from "node:stream";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Session } from "./sessions";
 import { appendLog } from "./logger";
 import { readPrivateBlob } from "./blob-storage";
@@ -25,29 +26,28 @@ const VIDEO_MIME: Record<string, string> = {
   ".avi": "video/x-msvideo",
 };
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 const BETWEEN_IMAGES_MS = 500;
 const BETWEEN_VK_STEPS_MS = 450;
-const UPLOAD_FETCH_TIMEOUT_MS = 120_000;
+const PHOTO_UPLOAD_TIMEOUT_MS = 25_000;
+const VIDEO_UPLOAD_TIMEOUT_MS = 240_000;
 const MAX_UPLOAD_ATTEMPTS = 4;
-const RETRYABLE_UPLOAD_STATUS = new Set([405, 408, 429, 502, 503, 504]);
+const RETRYABLE_UPLOAD_STATUS = new Set([405, 408, 429, 500, 502, 503, 504]);
+
+function mediaSignal(timeout: number, signal?: AbortSignal) {
+  const timer = AbortSignal.timeout(timeout);
+  return signal ? AbortSignal.any([signal, timer]) : timer;
+}
 
 function uploadRetryDelay(attempt: number): number {
   return 800 * (attempt + 1) + Math.floor(Math.random() * 400);
 }
 
 function isRetryableVkUploadError(e: unknown): boolean {
-  if (e instanceof Error && e.name === "TimeoutError") return true;
+  if (!(e instanceof Error)) return false;
+  if (e.name === "TimeoutError" || (e instanceof TypeError && e.message === "fetch failed")) return true;
   const status = (e as Error & { status?: number }).status;
   if (status != null && RETRYABLE_UPLOAD_STATUS.has(status)) return true;
-  if (e instanceof Error) {
-    const msg = e.message;
-    if (msg.includes("пустой photo") || msg.includes("Неполный ответ VK upload server")) return true;
-  }
-  return false;
+  return e.message.includes("пустой photo") || e.message.includes("Неполный ответ VK upload server");
 }
 
 export type MediaUploadResult = {
@@ -55,14 +55,15 @@ export type MediaUploadResult = {
   errors: string[];
 };
 
-export type ImageBlobSource = { blob: Blob; fileName: string; source?: string };
+export type ImageBlobSource = { blob: Blob; fileName: string };
 
-export async function preloadPublishImages(imageUrls: string[]): Promise<ImageBlobSource[]> {
+export async function preloadPublishImages(imageUrls: string[], signal?: AbortSignal): Promise<ImageBlobSource[]> {
   const sources: ImageBlobSource[] = [];
   for (const url of imageUrls) {
-    const loaded = await loadImageBlob(url);
+    signal?.throwIfAborted();
+    const loaded = await loadImageBlob(url, mediaSignal(PHOTO_UPLOAD_TIMEOUT_MS, signal));
     const { blob, fileName } = await optimizeImageForVkUpload(loaded.blob, loaded.fileName);
-    sources.push({ blob, fileName, source: url });
+    sources.push({ blob, fileName });
   }
   return sources;
 }
@@ -71,11 +72,12 @@ async function fetchWallUploadUrl(
   sessionId: string,
   session: Session,
   groupId?: number,
+  signal?: AbortSignal,
 ): Promise<{ uploadUrl: string; session: Session }> {
   const params: Record<string, string | number> = {};
   if (groupId != null) params.group_id = groupId;
 
-  const serverCall = await vkMethod(sessionId, session, "photos.getWallUploadServer", params);
+  const serverCall = await vkMethod(sessionId, session, "photos.getWallUploadServer", params, signal);
   const currentSession = serverCall.session;
   const serverData = serverCall.data;
   if (serverData.error) {
@@ -90,23 +92,26 @@ async function postPhotoToVkUploadServer(
   uploadUrl: string,
   blob: Blob,
   fileName: string,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const formData = new FormData();
   formData.append("photo", blob, fileName);
   const uploadResp = await fetch(uploadUrl, {
     method: "POST",
     body: formData,
-    signal: AbortSignal.timeout(UPLOAD_FETCH_TIMEOUT_MS),
+    signal: mediaSignal(PHOTO_UPLOAD_TIMEOUT_MS, signal),
   });
-  const uploadResult = (await uploadResp.json().catch(() => ({}))) as Record<string, unknown>;
   if (!uploadResp.ok) {
-    const err = new Error(
-      `Ошибка загрузки на сервер VK: HTTP ${uploadResp.status}${uploadResult.error ? ` — ${String(uploadResult.error)}` : ""}`,
-    );
+    await uploadResp.body?.cancel().catch(() => {});
+    const err = new Error(`Ошибка загрузки на сервер VK: HTTP ${uploadResp.status}`);
     (err as Error & { status?: number }).status = uploadResp.status;
     throw err;
   }
-  return uploadResult;
+  const result: unknown = await uploadResp.json().catch(error => {
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  });
+  return result && typeof result === "object" ? result as Record<string, unknown> : {};
 }
 
 /** Загрузка фото на стену: с group_id — вложения для конкретного сообщества. */
@@ -115,31 +120,31 @@ export async function uploadWallPhotosForPublish(
   session: Session,
   imageSources: ImageBlobSource[],
   groupId?: number,
-  isAborted?: () => boolean,
+  signal?: AbortSignal,
 ): Promise<MediaUploadResult & { session: Session }> {
   const attachments: string[] = [];
   const errors: string[] = [];
   let currentSession = session;
 
   for (let i = 0; i < imageSources.length; i++) {
-    if (isAborted?.()) break;
-    if (i > 0) await sleep(BETWEEN_IMAGES_MS);
-    const { blob, fileName, source } = imageSources[i];
     try {
+      signal?.throwIfAborted();
+      if (i > 0) await sleep(BETWEEN_IMAGES_MS, undefined, { signal });
+      const { blob, fileName } = imageSources[i];
       let uploadResult: Record<string, unknown> | null = null;
 
       for (let attempt = 0; attempt < MAX_UPLOAD_ATTEMPTS; attempt++) {
-        if (isAborted?.()) break;
-        const { uploadUrl, session: ns } = await fetchWallUploadUrl(sessionId, currentSession, groupId);
+        const { uploadUrl, session: ns } = await fetchWallUploadUrl(sessionId, currentSession, groupId, signal);
         currentSession = ns;
-        await sleep(BETWEEN_VK_STEPS_MS);
+        await sleep(BETWEEN_VK_STEPS_MS, undefined, { signal });
 
         try {
-          const raw = await postPhotoToVkUploadServer(uploadUrl, blob, fileName);
+          const raw = await postPhotoToVkUploadServer(uploadUrl, blob, fileName, signal);
           parseVkPhotoUploadResult(raw);
           uploadResult = raw;
           break;
         } catch (e) {
+          signal?.throwIfAborted();
           if (isRetryableVkUploadError(e) && attempt < MAX_UPLOAD_ATTEMPTS - 1) {
             const reason =
               e instanceof Error && e.name === "TimeoutError"
@@ -147,11 +152,12 @@ export async function uploadWallPhotosForPublish(
                 : (e as Error & { status?: number }).status != null
                   ? `HTTP ${(e as Error & { status?: number }).status}`
                   : (e as Error).message;
-            appendLog(
+            void appendLog(
               "WARNING",
-              `VK upload ${reason}, retry ${attempt + 2}/${MAX_UPLOAD_ATTEMPTS} (group ${groupId ?? "user"})`,
-            );
-            await sleep(uploadRetryDelay(attempt));
+              `Фото ${i + 1}: ${reason}. Повтор ${attempt + 2}/${MAX_UPLOAD_ATTEMPTS}, сообщество ${groupId ?? "user"}`,
+              session.user_id,
+            ).catch(error => console.error("Photo retry log failed", error));
+            await sleep(uploadRetryDelay(attempt), undefined, { signal });
             continue;
           }
           throw e;
@@ -161,12 +167,12 @@ export async function uploadWallPhotosForPublish(
       if (!uploadResult) throw new Error("Не удалось загрузить фото на сервер VK");
       const { server, photo, hash } = parseVkPhotoUploadResult(uploadResult);
 
-      await sleep(BETWEEN_VK_STEPS_MS);
+      await sleep(BETWEEN_VK_STEPS_MS, undefined, { signal });
 
       const saveParams: Record<string, string | number> = { server, photo, hash };
       if (groupId != null) saveParams.group_id = groupId;
 
-      const saveCall = await vkMethod(sessionId, currentSession, "photos.saveWallPhoto", saveParams);
+      const saveCall = await vkMethod(sessionId, currentSession, "photos.saveWallPhoto", saveParams, signal);
       currentSession = saveCall.session;
       const saveData = saveCall.data;
       if (saveData.error) {
@@ -175,11 +181,12 @@ export async function uploadWallPhotosForPublish(
       const attachment = photoAttachmentFromSaveResponse(saveData.response);
       if (!attachment) throw new Error("photos.saveWallPhoto: пустой ответ");
       attachments.push(attachment);
-      appendLog("INFO", `Uploaded wall photo for publish${groupId != null ? ` (group ${groupId})` : ""}: ${source ?? fileName}`);
     } catch (e) {
+      if (signal?.aborted) break;
       const msg = (e as Error).message || String(e);
       errors.push(`Фото ${i + 1}: ${msg}`);
-      appendLog("ERROR", `Publish photo upload failed (${source ?? fileName}): ${msg}`);
+      void appendLog("ERROR", `Фото ${i + 1}, сообщество ${groupId ?? "user"}: ${msg}`, session.user_id)
+        .catch(error => console.error("Photo failure log failed", error));
     }
   }
 
@@ -217,11 +224,13 @@ export async function uploadWallVideoForPublish(
   session: Session,
   videoUrl: string,
   name: string,
+  signal?: AbortSignal,
 ): Promise<{ attachment: string; session: Session }> {
+  const uploadSignal = mediaSignal(VIDEO_UPLOAD_TIMEOUT_MS, signal);
   const { data: saveData, session: nextSession } = await vkMethod(sessionId, session, "video.save", {
     name: name.slice(0, 128),
     wallpost: "0",
-  });
+  }, uploadSignal);
   if (saveData.error) {
     throw new Error(`video.save: ${saveData.error.error_msg}`);
   }
@@ -241,7 +250,7 @@ export async function uploadWallVideoForPublish(
 
   const pathname = privateBlobPath(videoUrl);
   if (pathname) {
-    const result = await readPrivateBlob(pathname);
+    const result = await readPrivateBlob(pathname, undefined, uploadSignal);
     if (!result) throw new Error("Файл видео не найден");
     const ext = extname(pathname);
     contentType = VIDEO_MIME[ext] || "video/mp4";
@@ -256,9 +265,9 @@ export async function uploadWallVideoForPublish(
     const ext = extname(abs).toLowerCase();
     contentType = VIDEO_MIME[ext] || "video/mp4";
     fileName = `video${ext || ".mp4"}`;
-    videoStream = Readable.toWeb(createReadStream(abs)) as unknown as ReadableStream<Uint8Array>;
+    videoStream = Readable.toWeb(createReadStream(abs, { signal: uploadSignal })) as unknown as ReadableStream<Uint8Array>;
   } else {
-    const videoResp = await fetch(videoUrl);
+    const videoResp = await fetch(videoUrl, { signal: uploadSignal });
     if (!videoResp.ok || !videoResp.body) {
       throw new Error(`Не удалось загрузить видео: HTTP ${videoResp.status}`);
     }
@@ -275,43 +284,41 @@ export async function uploadWallVideoForPublish(
   );
   const epilogue = encoder.encode(`\r\n--${boundary}--\r\n`);
 
+  const reader = videoStream.getReader();
   const multipartStream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      controller.enqueue(preamble);
-      const reader = videoStream.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) controller.enqueue(value);
-        }
-      } catch (err) {
-        controller.error(err);
-        return;
+    start(controller) { controller.enqueue(preamble); },
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) {
+        controller.enqueue(epilogue);
+        controller.close();
+      } else {
+        controller.enqueue(value);
       }
-      controller.enqueue(epilogue);
-      controller.close();
     },
-    cancel(reason) {
-      videoStream.cancel(reason).catch(() => {});
-    },
+    cancel(reason) { return reader.cancel(reason); },
   });
 
-  const uploadResp = await fetch(uploadUrl, {
-    method: "POST",
-    headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
-    body: multipartStream,
-    // @ts-expect-error duplex required for streaming body in undici
-    duplex: "half",
-  });
-  if (!uploadResp.ok) {
-    await uploadResp.body?.cancel().catch(() => {});
-    throw new Error(`Ошибка загрузки видео в VK: HTTP ${uploadResp.status}`);
+  try {
+    const uploadResp = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+      body: multipartStream,
+      signal: uploadSignal,
+      // @ts-expect-error duplex required for streaming body in undici
+      duplex: "half",
+    });
+    if (!uploadResp.ok) {
+      await uploadResp.body?.cancel().catch(() => {});
+      throw new Error(`Ошибка загрузки видео в VK: HTTP ${uploadResp.status}`);
+    }
+
+    confirmVkVideoUpload(await uploadResp.json().catch(() => null), ownerId, videoId);
+    const accessKey = typeof resp?.access_key === "string" ? resp.access_key.trim() : "";
+    return { attachment: `video${ownerId}_${videoId}${accessKey ? `_${accessKey}` : ""}`, session: nextSession };
+  } finally {
+    await reader.cancel().catch(() => {});
   }
-
-  confirmVkVideoUpload(await uploadResp.json().catch(() => null), ownerId, videoId);
-  const accessKey = typeof resp?.access_key === "string" ? resp.access_key.trim() : "";
-  return { attachment: `video${ownerId}_${videoId}${accessKey ? `_${accessKey}` : ""}`, session: nextSession };
 }
 
 export async function uploadPublishVideos(
@@ -319,21 +326,25 @@ export async function uploadPublishVideos(
   session: Session,
   videoUrls: string[],
   videoName: string,
+  signal?: AbortSignal,
 ): Promise<MediaUploadResult & { session: Session }> {
   const attachments: string[] = [];
   const errors: string[] = [];
   let currentSession = session;
 
   for (let i = 0; i < videoUrls.length; i++) {
-    if (i > 0) await sleep(BETWEEN_IMAGES_MS);
     try {
-      const videoResult = await uploadWallVideoForPublish(sessionId, currentSession, videoUrls[i], videoName);
+      signal?.throwIfAborted();
+      if (i > 0) await sleep(BETWEEN_IMAGES_MS, undefined, { signal });
+      const videoResult = await uploadWallVideoForPublish(sessionId, currentSession, videoUrls[i], videoName, signal);
       currentSession = videoResult.session;
       attachments.push(videoResult.attachment);
     } catch (e) {
       const msg = (e as Error).message || String(e);
       errors.push(`Видео ${i + 1}: ${msg}`);
-      appendLog("ERROR", `Publish video upload failed: ${msg}`);
+      if (signal?.aborted) break;
+      void appendLog("ERROR", `Видео ${i + 1}: ${msg}`, session.user_id)
+        .catch(error => console.error("Video failure log failed", error));
     }
   }
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -235,6 +235,56 @@ test("вход через VK ID, публикации, отмена и изол�
     assert.equal(batch.canRetry, false);
   });
 
+  await t.test("повторяет загрузку фото после HTTP 500 с новым адресом VK", async () => {
+    await sharp({ create: { width: 8, height: 8, channels: 3, background: "#118844" } })
+      .png().toFile(join(uploads, "images", "retry.png"));
+    const postName = "Пост со сбоем загрузки";
+    await sql`insert into posts (user_id, name, text, images)
+      values ('1', ${postName}, 'Повтор загрузки фото', ARRAY['/uploads/images/retry.png'])`;
+    const batchId = randomUUID();
+    const response = await request("/api/publish/batch", { body: { batchId, postName, groupIds: [ids[2]] } });
+    assert.equal(response.status, 200);
+    const events = await response.text();
+    assert.match(events, /Загрузка фото для/);
+    assert.match(events, /"status":"suggested"/);
+    assert.match(events, /"type":"done"/);
+    const batch = (await history()).find(run => run.batchId === batchId);
+    assert.equal(batch.groups[0].status, "suggested");
+    const { lines } = await (await request("/api/logs")).json();
+    assert.ok(lines.some(line => line.includes("HTTP 500. Повтор 2/4")));
+  });
+
+  await t.test("обрывает текущую загрузку при отмене и оставляет группу доступной для повтора", async () => {
+    await sharp({ create: { width: 8, height: 8, channels: 3, background: "#118844" } })
+      .png().toFile(join(uploads, "images", "slow.png"));
+    const postName = "Пост с отменой загрузки";
+    await sql`insert into posts (user_id, name, text, images)
+      values ('1', ${postName}, 'Отмена загрузки фото', ARRAY['/uploads/images/slow.png'])`;
+    const batchId = randomUUID();
+    const controller = new AbortController();
+    const response = await request("/api/publish/batch", {
+      body: { batchId, postName, groupIds: [ids[2]] }, signal: controller.signal,
+    });
+    assert.equal(response.status, 200);
+    const started = join(uploads, "slow-photo-started");
+    for (let attempt = 0; ; attempt++) {
+      if (await access(started).then(() => true, () => false)) break;
+      if (attempt === 40) assert.fail("VK не получил запрос загрузки");
+      await delay(100);
+    }
+    controller.abort();
+    await response.body.cancel().catch(() => {});
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const batch = (await history()).find(run => run.batchId === batchId);
+      if (batch?.groups[0].status === "skipped") {
+        assert.equal(batch.canRetry, true);
+        return;
+      }
+      await delay(100);
+    }
+    assert.fail("Отмена не прервала загрузку фото");
+  });
+
   await t.test("переключается на предложку только при запрете публикации на стене", async () => {
     const batchId = randomUUID();
     const response = await request("/api/publish/batch", {
@@ -367,8 +417,9 @@ test("вход через VK ID, публикации, отмена и изол�
     assert.equal(logs.lines.length, 1);
     assert.match(logs.lines[0], /Только Борис/);
     await request("/api/logs", { account: "b", method: "DELETE" });
+    await sql`insert into logs (user_id, level, message) values ('1', 'INFO', 'Последнее событие Анны')`;
     const stats = await (await request("/api/stats")).json();
-    assert.ok(stats.recent_activity.some(event => event.message === "Только Анна"));
+    assert.ok(stats.recent_activity.some(event => event.message === "Последнее событие Анны"));
     assert.ok(stats.recent_activity.every(event => event.message !== "Только Борис"));
     assert.equal((await request(`/api/groups/${ids[0]}`, { account: "b", method: "DELETE" })).status, 404);
     assert.equal((await request(`/api/groups/${ids[0]}`, { body: { category: "Тест" }, method: "PATCH" })).status, 200);

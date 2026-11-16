@@ -88,6 +88,7 @@ export async function refreshTokens(
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(params).toString(),
+    signal: AbortSignal.timeout(15_000),
   });
   return resp.json();
 }

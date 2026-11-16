@@ -16,10 +16,10 @@ const IMAGE_MIME: Record<string, string> = {
   ".gif": "image/gif",
 };
 
-export async function loadImageBlob(imageUrl: string): Promise<{ blob: Blob; fileName: string }> {
+export async function loadImageBlob(imageUrl: string, signal?: AbortSignal): Promise<{ blob: Blob; fileName: string }> {
   const pathname = privateBlobPath(imageUrl);
   if (pathname) {
-    const result = await readPrivateBlob(pathname);
+    const result = await readPrivateBlob(pathname, undefined, signal);
     if (!result) throw new Error("Файл изображения не найден");
     const blob = await new Response(result.stream, {
       headers: { "Content-Type": result.blob.contentType },
@@ -34,11 +34,11 @@ export async function loadImageBlob(imageUrl: string): Promise<{ blob: Blob; fil
     if (!st?.isFile()) throw new Error("Файл изображения не найден");
     const ext = extname(abs).toLowerCase();
     const contentType = IMAGE_MIME[ext] || "image/jpeg";
-    const data = await readFile(abs);
+    const data = await readFile(abs, { signal });
     return { blob: new Blob([data], { type: contentType }), fileName: basename(abs) || `photo${ext}` };
   }
 
-  const imgResp = await fetch(imageUrl);
+  const imgResp = await fetch(imageUrl, { signal });
   if (!imgResp.ok) throw new Error(`Не удалось загрузить изображение: HTTP ${imgResp.status}`);
   const fileData = await imgResp.arrayBuffer();
   const contentType = imgResp.headers.get("content-type") || "image/jpeg";

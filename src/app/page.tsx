@@ -356,16 +356,18 @@ export default function Home() {
   }, [apiFetch]);
   const loadLogs = useCallback(async () => { try { const d = await apiFetch(`/api/logs?level=${logLevel}`); setLogs(d.lines || []); } catch {} }, [apiFetch, logLevel]);
   const loadBlacklist = useCallback(async () => { try { const d = await apiFetch("/api/blacklist"); setBlacklistedUrls(new Set((d as { url: string }[]).map((b) => b.url))); } catch {} }, [apiFetch]);
-  const loadHistory = useCallback(async () => {
-    setHistoryLoading(true);
-    setHistoryError("");
+  const loadHistory = useCallback(async ({ background = false } = {}) => {
+    if (!background) {
+      setHistoryLoading(true);
+      setHistoryError("");
+    }
     try {
       const batches = await apiFetch("/api/publish/history");
       setHistory(Array.isArray(batches) ? batches : []);
     } catch (error) {
-      setHistoryError(`Не удалось загрузить историю: ${(error as Error).message}`);
+      if (!background) setHistoryError(`Не удалось загрузить историю: ${(error as Error).message}`);
     } finally {
-      setHistoryLoading(false);
+      if (!background) setHistoryLoading(false);
     }
   }, [apiFetch]);
 
@@ -380,6 +382,22 @@ export default function Home() {
     else if (tab === "publish") { loadPosts(); loadGroups(); }
     else if (tab === "history") loadHistory();
   }, [user, tab, loadStats, loadPosts, loadGroups, loadLogs, loadBlacklist, loadHistory]);
+
+  const historyPending = history.some(batch => batch.groups.some(group => group.status === "queued" || group.status === "sending"));
+  useEffect(() => {
+    if (!user || tab !== "history" || !historyPending) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const update = async () => {
+      await loadHistory({ background: true });
+      if (!stopped) timer = setTimeout(update, 4_000);
+    };
+    timer = setTimeout(update, 4_000);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [user, tab, historyPending, loadHistory]);
 
   useEffect(() => {
     if (!publishPost || publishing || tab !== "publish") return;
@@ -756,6 +774,7 @@ export default function Home() {
       const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
       let buffer = "";
       let finished = false;
+      let interruptedMessage: string | undefined;
       try {
         while (true) {
           const { value, done } = await reader.read();
@@ -778,13 +797,16 @@ export default function Home() {
               progress.status = `Обработано ${event.completed} из ${event.total}`;
             }
             if (event.type === "done") finished = true;
+            if (event.type === "interrupted") interruptedMessage = event.message;
             setPublishProgress({ ...progress });
           }
         }
       } finally {
         reader.releaseLock();
       }
-      progress.status = finished ? "Отправка завершена" : "Отправка прервалась. Результаты доступны в истории";
+      progress.status = finished
+        ? `Отправка завершена. Опубликовано ${progress.success}, в предложке ${progress.suggested}, ошибок ${progress.failed}, без подтверждения ${progress.unknown}.`
+        : interruptedMessage || "Отправка прервалась. Результаты доступны в истории.";
     } catch (error) {
       progress.status = publishCancelRef.current
         ? "Отмена запрошена. Проверьте итог в истории"

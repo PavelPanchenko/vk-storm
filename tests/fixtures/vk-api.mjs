@@ -1,5 +1,11 @@
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+
 const fetchOriginal = globalThis.fetch;
 const exchangedCodes = new Set();
+let photoUploadServer = 0;
+const photoUploadAttempts = new Map();
 const attempts = new Map();
 const joinedGroups = new Set();
 const joinRequests = new Set();
@@ -36,6 +42,19 @@ globalThis.fetch = async (input, init) => {
   if (url.hostname === "upload.vk.test") {
     const file = init?.body?.get("photo");
     if (url.pathname !== "/103" || !(file instanceof Blob) || !file.size) throw new Error("Неверная загрузка тестового фото");
+    if (file.name === "slow.png") {
+      await writeFile(join(process.env.UPLOADS_DIR, "slow-photo-started"), "");
+      await delay(25_000, undefined, { signal: init.signal });
+    }
+    if (file.name === "retry.png") {
+      const attempt = url.searchParams.get("attempt");
+      const previous = photoUploadAttempts.get(file.name);
+      if (!previous) {
+        photoUploadAttempts.set(file.name, attempt);
+        return new Response("Temporary upstream failure", { status: 500 });
+      }
+      if (previous === attempt) return new Response("Expired upload URL", { status: 500 });
+    }
     return Response.json({ server: 10, hash: "test-hash", photo: JSON.stringify([{ filename: file.name }]) });
   }
   if (url.hostname !== "api.vk.com") return fetchOriginal(input, init);
@@ -75,7 +94,7 @@ globalThis.fetch = async (input, init) => {
     }
     case "/method/photos.getWallUploadServer": {
       if (params.get("group_id") !== "103") throw new Error("Запросили загрузку на стену другой группы");
-      return Response.json({ response: { upload_url: "https://upload.vk.test/103" } });
+      return Response.json({ response: { upload_url: `https://upload.vk.test/103?attempt=${++photoUploadServer}` } });
     }
     case "/method/photos.saveWallPhoto": {
       const [{ filename }] = JSON.parse(params.get("photo"));
