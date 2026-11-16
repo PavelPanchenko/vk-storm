@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Onest, Unbounded, JetBrains_Mono } from "next/font/google";
+import { Onest, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -14,13 +14,6 @@ const onest = Onest({
   display: "swap",
 });
 
-const unbounded = Unbounded({
-  subsets: ["latin", "cyrillic"],
-  weight: ["400", "500", "600", "700"],
-  variable: "--font-heading",
-  display: "swap",
-});
-
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   weight: ["400", "500"],
@@ -30,7 +23,7 @@ const jetbrainsMono = JetBrains_Mono({
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="ru" className={`${onest.variable} ${unbounded.variable} ${jetbrainsMono.variable}`}>
+    <html lang="ru" className={`${onest.variable} ${jetbrainsMono.variable}`}>
       <body suppressHydrationWarning>{children}</body>
     </html>
   );

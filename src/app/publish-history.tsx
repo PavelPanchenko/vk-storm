@@ -25,15 +25,19 @@ export function PublishHistory({ batches, onRefresh, onRetry, busy, loading, err
         return (
           <details key={batch.batchId} className="history-card">
             <summary>
+              <span className="history-entry-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6"/></svg>
+              </span>
               <span className="history-post">
                 <strong>{batch.postName}</strong>
                 <time dateTime={batch.createdAt}>{new Date(batch.createdAt).toLocaleString("ru-RU")}</time>
               </span>
               <span className="history-counts">
-                {batch.successCount} из {batch.totalGroups} отправлено
-                {batch.failedCount > 0 && <span className="history-error">Ошибки: {batch.failedCount}</span>}
-                {unsettled > 0 && <span>Без итога: {unsettled}</span>}
+                <span className="history-pill history-sent">{batch.successCount} из {batch.totalGroups} отправлено</span>
+                {batch.failedCount > 0 && <span className="history-pill history-error">Ошибки: {batch.failedCount}</span>}
+                {unsettled > 0 && <span className="history-pill">Без итога: {unsettled}</span>}
               </span>
+              <svg className="history-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
             </summary>
             <div className="history-details">
               {batch.postText && <p className="history-text">{batch.postText}</p>}
@@ -41,7 +45,7 @@ export function PublishHistory({ batches, onRefresh, onRetry, busy, loading, err
                 {batch.groups.map((group, index) => (
                   <li key={`${group.groupUrl}-${index}`}>
                     <a href={group.postUrl ?? group.groupUrl} target="_blank" rel="noreferrer">{group.groupName || group.groupUrl} ↗</a>
-                    <strong className={group.status === "failed" ? "history-error" : undefined}>{publishStatusLabels[group.status]}</strong>
+                    <strong className={`history-pill history-status-${group.status}`}>{publishStatusLabels[group.status]}</strong>
                     {group.error && <p>{group.error}</p>}
                   </li>
                 ))}

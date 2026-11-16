@@ -2,8 +2,10 @@
 
 import { useState, useEffect, useRef, useCallback, useId, useMemo } from "react";
 import Image from "next/image";
+import brandIcon from "./icon.png";
 import { mediaUploadConfig } from "@/lib/media-upload-config";
 import type { HistoryBatch, PublishEvent } from "@/lib/publish-status";
+import { Dashboard, type Stats } from "./dashboard";
 import { PublishHistory } from "./publish-history";
 import { isNotSubscribed, PublishPanel, type PublishProgress } from "./publish-panel";
 
@@ -61,10 +63,6 @@ interface User { user_id: string; name: string; avatar: string; direct_blob_uplo
 interface Post { name: string; text: string; image_count: number; images: string[]; videos: string[] }
 interface Group { id: number; url: string; name: string; category: string; photo: string; members_count: number; status: string; last_published: string | null; total_published: number }
 interface ToastItem { id: number; message: string; type: string }
-interface Stats {
-  total_posts: number; total_groups: number; total_published: number; total_errors: number;
-  recent_activity: { level: string; message: string; time: string }[];
-}
 const views = ["dashboard", "posts", "groups", "publish", "history", "parser", "logs"];
 let toastId = 0;
 
@@ -86,7 +84,7 @@ export default function Home() {
     window.addEventListener("hashchange", syncView);
     return () => window.removeEventListener("hashchange", syncView);
   }, []);
-  const [theme, setTheme] = useState<Theme>("dark");
+  const [theme, setTheme] = useState<Theme>("light");
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -210,7 +208,7 @@ export default function Home() {
   /* ===== THEME ===== */
   useEffect(() => {
     const stored = (typeof window !== "undefined" && localStorage.getItem("theme")) as Theme | null;
-    const initial: Theme = stored === "light" || stored === "dark" ? stored : "dark";
+    const initial: Theme = stored === "light" || stored === "dark" ? stored : "light";
     setTheme(initial);
     document.documentElement.setAttribute("data-theme", initial);
   }, []);
@@ -772,8 +770,9 @@ export default function Home() {
     return (
       <div id="login-screen">
         <div className="login-card">
-          <div className="login-logo">VK <span>Storm</span></div>
-          <p className="login-subtitle">Автоматическая публикация в группы VK</p>
+          <div className="login-logo"><BrandMark /> VK Storm</div>
+          <h1>Публикации в VK</h1>
+          <p className="login-subtitle">Войдите через VK ID, чтобы управлять постами и группами.</p>
           <div ref={vkOneTapRef} style={{width:"100%"}} />
         </div>
       </div>
@@ -789,8 +788,8 @@ export default function Home() {
 
       <div className="app-layout">
         <aside id="main-sidebar" className={`sidebar${sidebarOpen ? " open" : ""}`}>
-          <div className="sidebar-header"><div className="sidebar-brand">VK <span>Storm</span></div></div>
-          <nav className="sidebar-nav">
+          <div className="sidebar-header"><a className="sidebar-brand" href="#dashboard"><BrandMark /> VK Storm</a></div>
+          <nav className="sidebar-nav" aria-label="Разделы VK Storm">
             {([
               ["dashboard", "Главная", <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></>],
               ["posts", "Посты", <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></>],
@@ -812,13 +811,12 @@ export default function Home() {
           </nav>
           <div className="sidebar-footer">
             <div className="user-info">
-              {user.avatar && (
-                <Image className="user-avatar" src={user.avatar} alt="" width={36} height={36} unoptimized />
-              )}
+              {user.avatar ? <Image className="user-avatar" src={user.avatar} alt="" width={36} height={36} unoptimized /> :
+                <span className="user-avatar user-initial" aria-hidden="true">{(user.name || "VK").trim().slice(0, 1).toUpperCase()}</span>}
               <div className="user-name">{user.name || "Пользователь"}</div>
             </div>
             <div style={{display:"flex",gap:6}}>
-              <button className="btn btn-secondary btn-sm" onClick={toggleTheme} title="Сменить тему" style={{flex:"0 0 auto",padding:"6px 10px"}}>
+              <button className="btn btn-secondary btn-sm" onClick={toggleTheme} title="Сменить тему" aria-label={theme === "dark" ? "Включить светлую тему" : "Включить тёмную тему"}>
                 {theme === "dark"
                   ? <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
                   : <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>}
@@ -829,30 +827,10 @@ export default function Home() {
         </aside>
 
         <main className="main-content">
-          {/* Dashboard */}
+          <div className="content-frame">
           {tab === "dashboard" && (
-            <div>
-              <div className="toolbar dashboard-heading"><h1 className="page-title">Главная</h1><div className="toolbar-spacer"/><button className="btn btn-primary" onClick={() => setTab("publish")}>Новая публикация</button></div>
-              <div className="stats-grid">
-                {[["blue","Всего постов",stats?.total_posts],["green","Всего групп",stats?.total_groups],["orange","Отправлено",stats?.total_published],["red","Ошибки",stats?.total_errors]].map(([cls,label,val]) => (
-                  <div key={cls as string} className={`stat-card ${cls}`}><div className="stat-label">{label as string}</div><div className="stat-value">{val ?? "--"}</div></div>
-                ))}
-              </div>
-              <div className="toolbar dashboard-heading">
-                <h2 className="page-title">Последние публикации</h2>
-                <div className="toolbar-spacer"/>
-                {history.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => setTab("history")}>Вся история</button>}
-              </div>
-              <PublishHistory batches={history.slice(0, 3)} busy={publishing} loading={historyLoading} error={historyError} />
-              <h2 className="page-title" style={{fontSize:18}}>Последняя активность</h2>
-              <div className="activity-list">
-                {!stats?.recent_activity?.length ? <div className="empty-state"><p>Нет данных</p></div> :
-                  stats.recent_activity.map((a,i) => {
-                    const c: Record<string,string> = {success:"var(--success)",error:"var(--error)",warning:"var(--warning)",info:"var(--accent)"};
-                    return <div key={i} className="activity-item"><div className="activity-dot" style={{background:c[a.level]||c.info}}/><span>{a.message}</span><time className="activity-time" dateTime={a.time}>{new Date(a.time).toLocaleString("ru-RU")}</time></div>;
-                  })}
-              </div>
-            </div>
+            <Dashboard stats={stats} batches={history} loading={historyLoading} error={historyError} busy={publishing}
+              onPublish={() => setTab("publish")} onHistory={() => setTab("history")} />
           )}
 
           {/* Posts */}
@@ -868,21 +846,22 @@ export default function Home() {
               <div className="posts-grid">
                 {posts.length===0 ? <div className="empty-state" style={{gridColumn:"1/-1"}}><p>Нет постов</p></div> :
                   posts.map(p => (
-                    <div key={p.name} className="post-card">
+                    <article key={p.name} className="post-card">
+                      {p.images[0] && <Image className="post-cover" src={p.images[0]} alt="" width={380} height={170} unoptimized />}
                       <div className="post-card-header">
                         <div className="post-card-title">{p.name}</div>
                         <div style={{display:"flex",gap:4}}>
-                          <button className="btn btn-secondary btn-sm" onClick={() => openEditPost(p.name)} title="Редактировать">
+                          <button className="btn btn-secondary btn-sm" onClick={() => openEditPost(p.name)} title="Редактировать" aria-label={`Редактировать «${p.name}»`}>
                             <svg viewBox="0 0 24 24" width="14" height="14"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                           </button>
-                          <button className="btn btn-danger btn-sm" onClick={() => openConfirmDialog("Удалить пост?",p.name,() => deletePost(p.name))}>
+                          <button className="btn btn-danger btn-sm" aria-label={`Удалить «${p.name}»`} onClick={() => openConfirmDialog("Удалить пост?",p.name,() => deletePost(p.name))}>
                             <svg viewBox="0 0 24 24" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                           </button>
                         </div>
                       </div>
                       <div className="post-card-text">{p.text ? (p.text.length>100?p.text.slice(0,100)+"...":p.text) : <em style={{color:"var(--text-muted)"}}>Нет текста</em>}</div>
-                      <div className="post-card-footer" style={{display:"flex",gap:6}}><span className="badge badge-info">{p.image_count} изобр.</span>{p.videos?.length > 0 && <span className="badge badge-accent">{p.videos.length} видео</span>}</div>
-                    </div>
+                      <div className="post-card-footer" style={{display:"flex",gap:6}}>{p.image_count > 0 && <span className="badge badge-info">{p.image_count} изобр.</span>}{p.videos?.length > 0 && <span className="badge badge-secondary">{p.videos.length} видео</span>}</div>
+                    </article>
                   ))}
               </div>
             </div>
@@ -1012,7 +991,7 @@ export default function Home() {
                   <input className="input" value={parserCity} onChange={e => parserCitySearch(e.target.value)} placeholder="Город (необязательно)" style={{width:"100%"}} onFocus={() => { if (parserCitySuggestions.length > 0) setParserCityOpen(true); }} onBlur={() => setTimeout(() => setParserCityOpen(false), 200)}/>
                   {parserCityId && <button style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:"var(--text-muted)",cursor:"pointer",fontSize:16}} onClick={() => { setParserCity(""); setParserCityId(undefined); setParserCitySuggestions([]); }}>&times;</button>}
                   {parserCityOpen && parserCitySuggestions.length > 0 && (
-                    <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:50,background:"var(--card-bg)",border:"1px solid var(--border)",borderRadius:8,marginTop:4,maxHeight:200,overflowY:"auto",boxShadow:"0 4px 12px rgba(0,0,0,0.3)"}}>
+                    <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:50,background:"var(--bg-card)",border:"1px solid var(--border)",borderRadius:8,marginTop:4,maxHeight:200,overflowY:"auto",boxShadow:"0 4px 12px rgba(0,0,0,0.3)"}}>
                       {parserCitySuggestions.map(c => (
                         <div key={c.id} style={{padding:"8px 12px",cursor:"pointer",fontSize:13,borderBottom:"1px solid var(--border)"}} onMouseDown={() => parserSelectCity(c)}>
                           <span style={{fontWeight:500}}>{c.title}</span>
@@ -1129,6 +1108,7 @@ export default function Home() {
               </div>
             </div>
           )}
+          </div>
         </main>
       </div>
 
@@ -1225,6 +1205,10 @@ export default function Home() {
 }
 
 /* ===== MODAL ===== */
+function BrandMark() {
+  return <Image src={brandIcon} alt="" className="brand-mark" width={36} height={36} unoptimized />;
+}
+
 function Modal({ open, onClose, title, children, small }: { open: boolean; onClose: () => void; title: string; children: React.ReactNode; small?: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -1299,7 +1283,7 @@ function FileDropZone({files,setFiles,kind="image",label}: {files:File[];setFile
 /* ===== UPLOAD PROGRESS BAR ===== */
 function UploadProgressBar({progress}: {progress: {name: string; pct: number}}) {
   return (
-    <div style={{margin:"12px 0",padding:"10px 12px",background:"var(--bg)",borderRadius:8,border:"1px solid var(--border)"}}>
+    <div style={{margin:"12px 0",padding:"10px 12px",background:"var(--bg-primary)",borderRadius:8,border:"1px solid var(--border)"}}>
       <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:6,gap:12}}>
         <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:0}}>{progress.name}</span>
         <span style={{color:"var(--text-muted)",flexShrink:0}}>{Math.round(progress.pct)}%</span>
