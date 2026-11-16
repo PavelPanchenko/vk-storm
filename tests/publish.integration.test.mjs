@@ -413,4 +413,37 @@ test("вход через VK ID, публикации, отмена и изол�
     assert.equal((await request(`/api/posts/${encodeURIComponent(post)}`, { method: "DELETE" })).status, 200);
     assert.equal((await request(mediaUrl)).status, 404);
   });
+
+  await t.test("сохраняет пустые категории и переносит только группы своего аккаунта", async () => {
+    const path = "/api/groups/categories";
+    const list = async options => (await request(path, options)).json();
+    const name = "Подборка";
+    assert.equal((await request(path, { account: null })).status, 401);
+    assert.equal((await request(path, { body: { name: " " } })).status, 400);
+    const created = await request(path, { body: { name: ` ${name} ` } });
+    assert.equal(created.status, 201);
+    assert.deepEqual(await created.json(), { name });
+    assert.equal((await request(path, { body: { name } })).status, 409);
+    assert.ok((await list()).includes(name));
+    assert.ok(!(await list({ account: "b" })).includes(name));
+
+    const single = await request(`/api/groups/${ids[0]}`, { method: "PATCH", body: { category: name } });
+    assert.equal(single.status, 200);
+    const bulk = await request("/api/groups/bulk", {
+      method: "PATCH", body: { urls: [targets[1].url, targets[2].url, targets[6].url, targets[1].url], category: name },
+    });
+    assert.equal(bulk.status, 200);
+    assert.deepEqual(await bulk.json(), { moved: 2 });
+    const own = await (await request("/api/groups")).json();
+    assert.deepEqual(own.filter(group => group.category === name).map(group => group.id), ids.slice(0, 3));
+    const other = await (await request("/api/groups", { account: "b" })).json();
+    assert.equal(other.find(group => group.id === ids[6]).category, "Без категории");
+
+    const reverted = await request("/api/groups/bulk", {
+      method: "PATCH", body: { urls: targets.slice(0, 3).map(group => group.url), category: "Без категории" },
+    });
+    assert.deepEqual(await reverted.json(), { moved: 3 });
+    assert.ok((await list()).includes(name));
+    assert.ok((await list()).includes("Тест"));
+  });
 });

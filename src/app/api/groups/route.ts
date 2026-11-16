@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireSession } from "@/lib/api-auth";
-import { readGroupRows, addGroup, getPublishStats } from "@/lib/groups";
+import { readGroupRows, addGroup, getPublishStats, DEFAULT_GROUP_CATEGORY } from "@/lib/groups";
 import { appendLog } from "@/lib/logger";
 
 export async function GET() {
@@ -31,7 +31,7 @@ export async function POST(request: NextRequest) {
   if (result.error) return result.error;
   const body = await request.json();
   const url = (body.url || "").trim();
-  const category = (body.category || "Без категории").trim();
+  const category = typeof body.category === "string" ? body.category.trim() || DEFAULT_GROUP_CATEGORY : DEFAULT_GROUP_CATEGORY;
   const photo = (body.photo || "").trim();
   const membersCount = Number(body.members_count) || 0;
 

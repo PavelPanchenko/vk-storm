@@ -521,6 +521,8 @@ body {
 .badge-success { background: var(--success-bg); color: var(--success); }
 
 .category-filter { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.category-filter .btn { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.group-category-select { width: auto; min-width: 100px; max-width: min(220px, 100%); font-size: 12px; }
 
 .groups-list { display: flex; flex-direction: column; gap: 10px; }
 

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireSession } from "@/lib/api-auth";
-import { readGroups, addGroup, removeGroup, updateGroupCategory } from "@/lib/groups";
+import { readGroups, addGroup, removeGroup, updateGroupCategory, DEFAULT_GROUP_CATEGORY } from "@/lib/groups";
 import { appendLog } from "@/lib/logger";
 
 export async function POST(request: NextRequest) {
@@ -9,7 +9,7 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json();
   const urlsRaw = body.urls || "";
-  const category = (body.category || "Без категории").trim();
+  const category = typeof body.category === "string" ? body.category.trim() || DEFAULT_GROUP_CATEGORY : DEFAULT_GROUP_CATEGORY;
   let urls: string[];
   if (Array.isArray(urlsRaw)) {
     urls = urlsRaw;
@@ -78,22 +78,18 @@ export async function PATCH(request: NextRequest) {
   const result = await requireSession();
   if (result.error) return result.error;
 
-  const body = await request.json();
-  const urls: string[] = body.urls || [];
-  const category = (body.category || "").trim();
+  const body = await request.json().catch(() => null);
+  const urls: unknown = body?.urls;
+  const category = typeof body?.category === "string" ? body.category.trim() : "";
 
-  if (!Array.isArray(urls) || urls.length === 0) {
+  if (!Array.isArray(urls) || urls.length === 0 || !urls.every(url => typeof url === "string" && url)) {
     return NextResponse.json({ detail: "Список URL пуст" }, { status: 400 });
   }
   if (!category) {
     return NextResponse.json({ detail: "Категория обязательна" }, { status: 400 });
   }
 
-  let moved = 0;
-  for (const url of urls) {
-    await updateGroupCategory(result.session.user_id, url, category);
-    moved++;
-  }
+  const moved = await updateGroupCategory(result.session.user_id, urls, category);
 
   await appendLog("INFO", `Bulk move: ${moved} groups → ${category}`, result.session.user_id);
   return NextResponse.json({ moved });

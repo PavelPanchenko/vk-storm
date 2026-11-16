@@ -94,6 +94,7 @@ export default function Home() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [logLevel, setLogLevelState] = useState("all");
 
@@ -102,6 +103,7 @@ export default function Home() {
   const [showEditPost, setShowEditPost] = useState(false);
   const [showAddGroup, setShowAddGroup] = useState(false);
   const [showBulkGroup, setShowBulkGroup] = useState(false);
+  const [showAddCategory, setShowAddCategory] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [confirmData, setConfirmData] = useState({ title: "", message: "", onConfirm: () => {} });
 
@@ -131,9 +133,13 @@ export default function Home() {
   const [bulkCategory, setBulkCategory] = useState("");
   const [bulkError, setBulkError] = useState("");
   const [bulkImporting, setBulkImporting] = useState(false);
-  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [categoryName, setCategoryName] = useState("");
+  const [categoryError, setCategoryError] = useState("");
+  const [addingCategory, setAddingCategory] = useState(false);
   const [groupSelectedIds, setGroupSelectedIds] = useState<Set<number>>(new Set());
   const [groupMoveCategory, setGroupMoveCategory] = useState("");
+  const [movingGroups, setMovingGroups] = useState(false);
   const [groupFriends, setGroupFriends] = useState<Record<string, number>>({});
   const [loadingFriends, setLoadingFriends] = useState(false);
 
@@ -339,7 +345,13 @@ export default function Home() {
   /* ===== DATA LOADING ===== */
   const loadStats = useCallback(async () => { try { setStats(await apiFetch("/api/stats")); } catch {} }, [apiFetch]);
   const loadPosts = useCallback(async () => { try { const d = await apiFetch("/api/posts"); setPosts(Array.isArray(d) ? d : d.posts || []); } catch {} }, [apiFetch]);
-  const loadGroups = useCallback(async () => { try { const d = await apiFetch("/api/groups"); setGroups(Array.isArray(d) ? d : d.groups || []); } catch {} }, [apiFetch]);
+  const loadGroups = useCallback(async () => {
+    const [list, names] = await Promise.allSettled([
+      apiFetch("/api/groups"), apiFetch("/api/groups/categories"),
+    ]);
+    if (list.status === "fulfilled") setGroups(Array.isArray(list.value) ? list.value : list.value.groups || []);
+    if (names.status === "fulfilled") setCategories(names.value);
+  }, [apiFetch]);
   const loadLogs = useCallback(async () => { try { const d = await apiFetch(`/api/logs?level=${logLevel}`); setLogs(d.lines || []); } catch {} }, [apiFetch, logLevel]);
   const loadBlacklist = useCallback(async () => { try { const d = await apiFetch("/api/blacklist"); setBlacklistedUrls(new Set((d as { url: string }[]).map((b) => b.url))); } catch {} }, [apiFetch]);
   const loadHistory = useCallback(async () => {
@@ -459,6 +471,30 @@ export default function Home() {
   };
 
   /* ===== GROUP CRUD ===== */
+  const addCategory = async () => {
+    if (!categoryName.trim() || addingCategory) return;
+    setAddingCategory(true);
+    setCategoryError("");
+    try {
+      const { name } = await apiFetch("/api/groups/categories", {
+        method: "POST", body: JSON.stringify({ name: categoryName }),
+      });
+      setCategories(previous => [...new Set([...previous, name])]);
+      setShowAddCategory(false);
+      toast("Категория создана", "success");
+    } catch (error) {
+      setCategoryError((error as Error).message);
+    } finally {
+      setAddingCategory(false);
+    }
+  };
+
+  const filterGroupsByCategory = (category: string | null) => {
+    setCategoryFilter(category);
+    setGroupSelectedIds(new Set());
+    setGroupMoveCategory("");
+  };
+
   const addGroup = async () => {
     setGroupUrlError("");
     if (!groupUrl.trim()) { setGroupUrlError("Введите URL"); return; }
@@ -492,22 +528,32 @@ export default function Home() {
   };
 
   const changeGroupCategory = async (id: number, category: string) => {
+    setMovingGroups(true);
     try {
       await apiFetch(`/api/groups/${id}`, { method: "PATCH", body: JSON.stringify({ category }) });
-      loadGroups();
+      setGroups(previous => previous.map(group => group.id === id ? { ...group, category } : group));
+      setGroupSelectedIds(previous => {
+        const selected = new Set(previous);
+        selected.delete(id);
+        return selected;
+      });
+      toast("Группа перемещена", "success");
     } catch (e) { toast((e as Error).message, "error"); }
+    finally { setMovingGroups(false); }
   };
 
   const massMoveGroups = async (category: string) => {
-    if (!category.trim() || groupSelectedIds.size === 0) return;
+    if (!category || groupSelectedIds.size === 0) return;
     const urls = groups.filter(g => groupSelectedIds.has(g.id)).map(g => g.url);
+    setMovingGroups(true);
     try {
-      const res = await apiFetch("/api/groups/bulk", { method: "PATCH", body: JSON.stringify({ urls, category: category.trim() }) });
+      const res = await apiFetch("/api/groups/bulk", { method: "PATCH", body: JSON.stringify({ urls, category }) });
       toast(`Перемещено: ${res.moved}`, "success");
+      await loadGroups();
+      setGroupSelectedIds(new Set());
+      setGroupMoveCategory("");
     } catch (e) { toast((e as Error).message, "error"); }
-    setGroupSelectedIds(new Set());
-    setGroupMoveCategory("");
-    loadGroups();
+    finally { setMovingGroups(false); }
   };
 
   const massDeleteGroups = async () => {
@@ -771,6 +817,9 @@ export default function Home() {
     setShowSubscribeAllPrompt(true);
   }, [publishProgress.done, publishing, getNotSubscribedCommunityUrls, subscribePromptSeenKey]);
 
+  const groupCategoryOptions = Array.from(new Set([...categories, ...groups.map(group => group.category)]));
+  const visibleGroups = groups.filter(group => categoryFilter === null || group.category === categoryFilter);
+
   /* ===== RENDER ===== */
   if (!authChecked) return <div id="login-screen" role="status">Загрузка VK Storm…</div>;
 
@@ -893,47 +942,53 @@ export default function Home() {
                 <button className="btn btn-secondary" onClick={() => {setBulkUrls("");setBulkCategory("");setBulkError("");setShowBulkGroup(true);}}>
                   <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Импорт
                 </button>
-                <button className="btn btn-primary" onClick={() => {setGroupUrl("");setGroupCategory("");setGroupUrlError("");setShowAddGroup(true);}}>
+                <button className="btn btn-primary" onClick={() => {setGroupUrl("");setGroupCategory(categoryFilter ?? "");setGroupUrlError("");setShowAddGroup(true);}}>
                   <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Добавить группу
                 </button>
               </div>
-              {(() => {
-                const cats = Array.from(new Set(groups.map(g => g.category)));
-                return cats.length > 1 ? (
-                  <div className="category-filter">
-                    <button className={`btn btn-sm ${categoryFilter==="all"?"btn-primary":"btn-secondary"}`} onClick={() => setCategoryFilter("all")}>Все ({groups.length})</button>
-                    {cats.map(c => {
-                      const count = groups.filter(g => g.category === c).length;
-                      return <button key={c} className={`btn btn-sm ${categoryFilter===c?"btn-primary":"btn-secondary"}`} onClick={() => setCategoryFilter(c)}>{c} ({count})</button>;
-                    })}
-                  </div>
-                ) : null;
-              })()}
-              {groups.length > 0 && (
+              <div className="category-filter" role="group" aria-label="Категории групп">
+                <button className={`btn btn-sm ${categoryFilter === null ? "btn-primary" : "btn-secondary"}`} aria-pressed={categoryFilter === null} onClick={() => filterGroupsByCategory(null)}>Все ({groups.length})</button>
+                {groupCategoryOptions.map(category => (
+                  <button key={category} className={`btn btn-sm ${categoryFilter === category ? "btn-primary" : "btn-secondary"}`}
+                    aria-pressed={categoryFilter === category} onClick={() => filterGroupsByCategory(category)}>
+                    {category} ({groups.filter(group => group.category === category).length})
+                  </button>
+                ))}
+                <button className="btn btn-secondary btn-sm" onClick={() => {
+                  setCategoryName("");
+                  setCategoryError("");
+                  setShowAddCategory(true);
+                }}>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                  Создать категорию
+                </button>
+              </div>
+              {visibleGroups.length > 0 && (
                 <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:12,flexWrap:"wrap"}}>
                   <label style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:13,cursor:"pointer"}}>
-                    <input type="checkbox" checked={groupSelectedIds.size === groups.filter(g => categoryFilter === "all" || g.category === categoryFilter).length && groupSelectedIds.size > 0} onChange={e => {
-                      if (e.target.checked) {
-                        const filtered = groups.filter(g => categoryFilter === "all" || g.category === categoryFilter);
-                        setGroupSelectedIds(new Set(filtered.map(g => g.id)));
-                      } else setGroupSelectedIds(new Set());
-                    }} style={{accentColor:"var(--accent)"}}/>
+                    <input type="checkbox" disabled={movingGroups} checked={visibleGroups.every(group => groupSelectedIds.has(group.id))}
+                      onChange={e => setGroupSelectedIds(new Set(e.target.checked ? visibleGroups.map(group => group.id) : []))}
+                      style={{accentColor:"var(--accent)"}}/>
                     <span>Выбрать все</span>
                   </label>
                   {groupSelectedIds.size > 0 && (<>
                     <span style={{fontSize:13,color:"var(--text-muted)"}}>Выбрано: {groupSelectedIds.size}</span>
-                    <input className="input" value={groupMoveCategory} onChange={e => setGroupMoveCategory(e.target.value)} placeholder="Новая категория" style={{width:160,fontSize:12,padding:"4px 8px"}} list="move-cat-list"/>
-                    <datalist id="move-cat-list">{Array.from(new Set(groups.map(g=>g.category))).map(c=><option key={c} value={c}/>)}</datalist>
-                    <button className="btn btn-accent btn-sm" disabled={!groupMoveCategory.trim()} onClick={() => massMoveGroups(groupMoveCategory)}>Переместить</button>
-                    <button className="btn btn-danger btn-sm" onClick={() => openConfirmDialog("Удалить выбранные?", `${groupSelectedIds.size} групп будет удалено`, massDeleteGroups)}>Удалить</button>
+                    <select className="select group-category-select" aria-label="Категория для выбранных групп" value={groupMoveCategory}
+                      disabled={movingGroups} onChange={e => setGroupMoveCategory(e.target.value)}>
+                      <option value="" disabled>Категория назначения</option>
+                      {groupCategoryOptions.map(category => <option key={category} value={category}>{category}</option>)}
+                    </select>
+                    <button className="btn btn-accent btn-sm" disabled={!groupMoveCategory || movingGroups} onClick={() => massMoveGroups(groupMoveCategory)}>Переместить</button>
+                    <button className="btn btn-danger btn-sm" disabled={movingGroups} onClick={() => openConfirmDialog("Удалить выбранные?", `${groupSelectedIds.size} групп будет удалено`, massDeleteGroups)}>Удалить</button>
                   </>)}
                   {user && <button className="btn btn-sm btn-secondary" disabled={loadingFriends} onClick={loadGroupsFriends}>{loadingFriends ? <><span className="spinner"/> Загрузка...</> : "👥 Друзья в группах"}</button>}
                 </div>
               )}
               <div className="groups-list">
-                {groups.length===0 ? <div className="empty-state"><p>Нет групп</p><button className="btn btn-primary" onClick={() => setShowAddGroup(true)}>Добавить первую группу</button></div> :
-                  groups.filter(g => categoryFilter === "all" || g.category === categoryFilter).map((g) => {
-                    const cats = Array.from(new Set(groups.map(gr => gr.category)));
+                {visibleGroups.length === 0 ? <div className="empty-state">
+                  <p>{categoryFilter === null ? "Нет групп" : "В этой категории пока нет групп"}</p>
+                </div> :
+                  visibleGroups.map((g) => {
                     const timeSince = (dateStr: string | null) => {
                       if (!dateStr) return null;
                       const diff = Date.now() - new Date(dateStr).getTime();
@@ -945,7 +1000,7 @@ export default function Home() {
                     };
                     return (
                       <div key={g.id} className="group-card">
-                        <input type="checkbox" checked={groupSelectedIds.has(g.id)} onChange={() => setGroupSelectedIds(prev => { const n = new Set(prev); if (n.has(g.id)) n.delete(g.id); else n.add(g.id); return n; })} style={{accentColor:"var(--accent)",width:16,height:16,flexShrink:0,cursor:"pointer"}}/>
+                        <input type="checkbox" aria-label={`Выбрать ${g.name}`} disabled={movingGroups} checked={groupSelectedIds.has(g.id)} onChange={() => setGroupSelectedIds(prev => { const n = new Set(prev); if (n.has(g.id)) n.delete(g.id); else n.add(g.id); return n; })} style={{accentColor:"var(--accent)",width:16,height:16,flexShrink:0,cursor:"pointer"}}/>
                         {g.photo
                           ? <Image src={g.photo} alt="" width={40} height={40} unoptimized style={{borderRadius:10,objectFit:"cover",flexShrink:0}}/>
                           : <div className={`status-dot ${g.status==="ok"?"green":g.status==="error"?"red":"gray"}`}/>}
@@ -962,8 +1017,9 @@ export default function Home() {
                             )}
                           </div>
                         </div>
-                        <select className="select" value={g.category} onChange={e => changeGroupCategory(g.id, e.target.value)} onClick={e => e.stopPropagation()} style={{width:"auto",minWidth:100,fontSize:12,padding:"4px 8px"}}>
-                          {cats.map(c => <option key={c} value={c}>{c}</option>)}
+                        <select className="select group-category-select" aria-label={`Категория группы ${g.name}`} title="Переместить группу в другую категорию"
+                          disabled={movingGroups} value={g.category} onChange={e => changeGroupCategory(g.id, e.target.value)}>
+                          {groupCategoryOptions.map(category => <option key={category} value={category}>{category}</option>)}
                         </select>
                         <button className="btn btn-danger btn-sm" onClick={() => openConfirmDialog("Удалить группу?",g.name,() => deleteGroup(g.id))}>
                           <svg viewBox="0 0 24 24" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
@@ -1020,7 +1076,7 @@ export default function Home() {
               </div>
               <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:16,flexWrap:"wrap"}}>
                 <input className="input" value={parserCategory} onChange={e => setParserCategory(e.target.value)} placeholder="Категория для добавления" style={{maxWidth:250}} list="parser-cat-list"/>
-                <datalist id="parser-cat-list">{Array.from(new Set(groups.map(g=>g.category))).map(c=><option key={c} value={c}/>)}</datalist>
+                <datalist id="parser-cat-list">{groupCategoryOptions.map(c=><option key={c} value={c}/>)}</datalist>
                 <input className="input" type="number" min={0} value={parserMembersMin} onChange={e => setParserMembersMin(e.target.value)} placeholder="Уч. от" style={{maxWidth:110}}/>
                 <input className="input" type="number" min={0} value={parserMembersMax} onChange={e => setParserMembersMax(e.target.value)} placeholder="Уч. до" style={{maxWidth:110}}/>
                 {parserResults.length > 0 && (<>
@@ -1159,14 +1215,29 @@ export default function Home() {
         <div className="modal-footer"><button className="btn btn-secondary" onClick={() => setShowEditPost(false)}>Отмена</button><button className="btn btn-primary" disabled={saving} onClick={saveEditPost}>{saving?<><span className="spinner"/> {uploadProgress ? "Загрузка..." : "Сохранение..."}</>:"Сохранить"}</button></div>
       </Modal>
 
+      <Modal open={showAddCategory} onClose={() => { if (!addingCategory) setShowAddCategory(false); }} title="Создать категорию" small>
+        <form onSubmit={event => { event.preventDefault(); void addCategory(); }}>
+          <div className="form-group">
+            <label htmlFor="group-category-name" className="form-label">Название</label>
+            <input id="group-category-name" className="input" value={categoryName} maxLength={120} required
+              disabled={addingCategory} onChange={event => { setCategoryName(event.target.value); setCategoryError(""); }} />
+            {categoryError && <div className="form-error" role="alert">{categoryError}</div>}
+          </div>
+          <div className="modal-footer">
+            <button type="button" className="btn btn-secondary" disabled={addingCategory} onClick={() => setShowAddCategory(false)}>Отмена</button>
+            <button type="submit" className="btn btn-primary" disabled={addingCategory || !categoryName.trim()}>Создать</button>
+          </div>
+        </form>
+      </Modal>
+
       <Modal open={showAddGroup} onClose={() => setShowAddGroup(false)} title="Добавить группу">
         <div className="form-group"><label className="form-label">URL группы</label><input className="input" value={groupUrl} onChange={e=>setGroupUrl(e.target.value)} placeholder="https://vk.com/mygroup"/>{groupUrlError&&<div className="form-error">{groupUrlError}</div>}</div>
-        <div className="form-group"><label className="form-label">Категория</label><input className="input" value={groupCategory} onChange={e=>setGroupCategory(e.target.value)} placeholder="Авто, Бизнес, ..." list="category-list"/><datalist id="category-list">{Array.from(new Set(groups.map(g=>g.category))).map(c=><option key={c} value={c}/>)}</datalist></div>
+        <div className="form-group"><label className="form-label">Категория</label><input className="input" value={groupCategory} onChange={e=>setGroupCategory(e.target.value)} placeholder="Авто, Бизнес, ..." list="category-list"/><datalist id="category-list">{groupCategoryOptions.map(c=><option key={c} value={c}/>)}</datalist></div>
         <div className="modal-footer"><button className="btn btn-secondary" onClick={() => setShowAddGroup(false)}>Отмена</button><button className="btn btn-primary" onClick={addGroup}>Добавить</button></div>
       </Modal>
 
       <Modal open={showBulkGroup} onClose={() => setShowBulkGroup(false)} title="Импорт групп">
-        <div className="form-group"><label className="form-label">Категория</label><input className="input" value={bulkCategory} onChange={e=>setBulkCategory(e.target.value)} placeholder="Авто, Бизнес, ..." list="bulk-category-list"/><datalist id="bulk-category-list">{Array.from(new Set(groups.map(g=>g.category))).map(c=><option key={c} value={c}/>)}</datalist></div>
+        <div className="form-group"><label className="form-label">Категория</label><input className="input" value={bulkCategory} onChange={e=>setBulkCategory(e.target.value)} placeholder="Авто, Бизнес, ..." list="bulk-category-list"/><datalist id="bulk-category-list">{groupCategoryOptions.map(c=><option key={c} value={c}/>)}</datalist></div>
         <div className="form-group"><label className="form-label">Ссылки (по одной на строку)</label><textarea className="textarea" rows={10} value={bulkUrls} onChange={e=>setBulkUrls(e.target.value)} placeholder={"https://vk.com/group1\nhttps://vk.com/group2"}/>{bulkError&&<div className="form-error">{bulkError}</div>}</div>
         <div className="modal-footer"><button className="btn btn-secondary" onClick={() => setShowBulkGroup(false)}>Отмена</button><button className="btn btn-primary" disabled={bulkImporting} onClick={bulkImportGroups}>{bulkImporting?<><span className="spinner"/> Импорт...</>:"Импортировать"}</button></div>
       </Modal>

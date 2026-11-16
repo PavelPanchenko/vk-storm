@@ -4,6 +4,7 @@ import { requireSession } from "@/lib/api-auth";
 import { db } from "@/lib/db";
 import { groups } from "@/lib/db/schema";
 import { appendLog } from "@/lib/logger";
+import { updateGroupCategory } from "@/lib/groups";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -34,9 +35,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
   const body = await request.json().catch(() => null);
   const category = typeof body?.category === "string" ? body.category.trim() : "";
   if (!category) return NextResponse.json({ detail: "Категория обязательна" }, { status: 400 });
-  const [updated] = await db.update(groups).set({ category })
-    .where(and(eq(groups.userId, auth.session.user_id), eq(groups.id, id)))
-    .returning({ id: groups.id });
+  const updated = await updateGroupCategory(auth.session.user_id, id, category);
   if (!updated) return NextResponse.json({ detail: "Группа не найдена" }, { status: 404 });
   return NextResponse.json({ status: "ok" });
 }

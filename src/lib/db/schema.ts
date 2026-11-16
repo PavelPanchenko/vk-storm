@@ -1,4 +1,4 @@
-import { pgTable, text, integer, timestamp, boolean, serial, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, timestamp, boolean, serial, index, primaryKey, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const sessions = pgTable("sessions", {
   id: text("id").primaryKey(),
@@ -27,6 +27,11 @@ export const groups = pgTable(
     groupsUserUrlUnique: uniqueIndex("groups_user_url_unique").on(table.userId, table.url),
   }),
 );
+
+export const groupCategories = pgTable("group_categories", {
+  userId: text("user_id").notNull(),
+  name: text("name").notNull(),
+}, table => [primaryKey({ columns: [table.userId, table.name] })]);
 
 export const posts = pgTable(
   "posts",

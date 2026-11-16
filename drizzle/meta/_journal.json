@@ -50,6 +50,13 @@
       "when": 1794840000000,
       "tag": "0006_publish_tracking",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794862796956,
+      "tag": "0007_group_categories",
+      "breakpoints": true
     }
   ]
 }

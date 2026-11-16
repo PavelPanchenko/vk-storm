@@ -1,6 +1,8 @@
 import { db } from "./db";
-import { groups, publishResults } from "./db/schema";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { groupCategories, groups, publishResults } from "./db/schema";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
+
+export const DEFAULT_GROUP_CATEGORY = "Без категории";
 
 export interface GroupRow {
   id: number;
@@ -24,16 +26,27 @@ export async function readGroups(userId: string): Promise<string[]> {
   return rows.map((r) => r.url);
 }
 
-export async function addGroup(userId: string, url: string, category = "Без категории", photo = "", membersCount = 0): Promise<void> {
-  await db.insert(groups).values({ userId, url, category, photo, membersCount }).onConflictDoNothing();
+export async function addGroup(userId: string, url: string, category = DEFAULT_GROUP_CATEGORY, photo = "", membersCount = 0): Promise<void> {
+  await db.transaction(async tx => {
+    const [added] = await tx.insert(groups).values({ userId, url, category, photo, membersCount })
+      .onConflictDoNothing().returning({ id: groups.id });
+    if (added) await saveCategory(userId, category, tx);
+  });
 }
 
 export async function removeGroup(userId: string, url: string): Promise<void> {
   await db.delete(groups).where(and(eq(groups.userId, userId), eq(groups.url, url)));
 }
 
-export async function updateGroupCategory(userId: string, url: string, category: string): Promise<void> {
-  await db.update(groups).set({ category }).where(and(eq(groups.userId, userId), eq(groups.url, url)));
+export async function updateGroupCategory(userId: string, target: number | string[], category: string): Promise<number> {
+  return db.transaction(async tx => {
+    const match = typeof target === "number" ? eq(groups.id, target) : inArray(groups.url, target);
+    const updated = await tx.update(groups).set({ category })
+      .where(and(eq(groups.userId, userId), match))
+      .returning({ id: groups.id });
+    if (updated.length) await saveCategory(userId, category, tx);
+    return updated.length;
+  });
 }
 
 export async function updateGroupPhoto(userId: string, url: string, photo: string): Promise<void> {
@@ -45,8 +58,17 @@ export async function updateGroupMembersCount(userId: string, url: string, membe
 }
 
 export async function getCategories(userId: string): Promise<string[]> {
-  const rows = await db.selectDistinct({ category: groups.category }).from(groups).where(eq(groups.userId, userId));
-  return rows.map((r) => r.category);
+  const rows = await db.select({ name: groupCategories.name }).from(groupCategories).where(eq(groupCategories.userId, userId))
+    .union(db.select({ name: groups.category }).from(groups).where(eq(groups.userId, userId)));
+  const names = rows.map(row => row.name).filter(name => name && name !== DEFAULT_GROUP_CATEGORY);
+  return [DEFAULT_GROUP_CATEGORY, ...names.sort((a, b) => a.localeCompare(b, "ru"))];
+}
+
+export async function saveCategory(userId: string, name: string, store: Pick<typeof db, "insert"> = db): Promise<boolean> {
+  if (name === DEFAULT_GROUP_CATEGORY) return false;
+  const [created] = await store.insert(groupCategories).values({ userId, name })
+    .onConflictDoNothing().returning({ name: groupCategories.name });
+  return Boolean(created);
 }
 
 export async function getPublishStats(userId: string): Promise<Record<string, { lastPublished: string; totalPublished: number }>> {
