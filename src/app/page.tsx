@@ -69,6 +69,9 @@ let toastId = 0;
 /* ===== MAIN ===== */
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
+  const [loginError, setLoginError] = useState("");
+  const [loginPending, setLoginPending] = useState(false);
+  const [loginAttempt, setLoginAttempt] = useState(0);
   const [authChecked, setAuthChecked] = useState(false);
   const [tab, setTabState] = useState("dashboard");
   const setTab = useCallback((view: string) => {
@@ -202,6 +205,12 @@ export default function Home() {
 
   /* ===== AUTH ===== */
   useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.has("auth_error")) {
+      setLoginError("Не удалось завершить вход через VK ID.");
+      url.searchParams.delete("auth_error");
+      window.history.replaceState(window.history.state, "", url);
+    }
     apiFetch("/api/auth/me").then(d => { setUser(d); setAuthChecked(true); }).catch(() => setAuthChecked(true));
   }, [apiFetch]);
 
@@ -234,30 +243,20 @@ export default function Home() {
 
   const vkOneTapRef = useRef<HTMLDivElement>(null);
 
-  // PKCE helpers for browser (Web Crypto)
-  const generatePKCE = useCallback(async () => {
-    const buf = new Uint8Array(32);
-    crypto.getRandomValues(buf);
-    const verifier = btoa(String.fromCharCode(...buf))
-      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-    const challenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
-      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    return { verifier, challenge };
-  }, []);
-
-  // Init VK ID OneTap widget
   useEffect(() => {
-    if (user || !authChecked) return;
+    const container = vkOneTapRef.current;
+    if (user || !authChecked || !container) return;
 
-    let codeVerifierStored = "";
+    const controller = new AbortController();
+    const { signal } = controller;
+    let exchanging = false;
 
     type VKIDOneTapInstance = {
+      close: () => void;
       render: (opts: { container: HTMLElement; showAlternativeLogin?: boolean }) => VKIDOneTapInstance;
-      on: (event: string, cb: (payload: VKIDLoginPayload | VKIDErrorPayload) => void) => VKIDOneTapInstance;
+      on: (event: string, cb: (payload?: VKIDLoginPayload) => void) => VKIDOneTapInstance;
     };
-    type VKIDLoginPayload = { code: string; device_id: string };
-    type VKIDErrorPayload = { code?: string; message?: string };
+    type VKIDLoginPayload = { code: string; device_id: string; state?: string };
     type VKIDSDK = {
       Config: { init: (opts: Record<string, unknown>) => void };
       ConfigResponseMode: { Callback: string };
@@ -267,57 +266,66 @@ export default function Home() {
       OneTap: new () => VKIDOneTapInstance;
     };
 
+    const showError = (message: string) => {
+      if (!signal.aborted) setLoginError(message);
+    };
     const script = document.createElement("script");
+    let oneTap: VKIDOneTapInstance | undefined;
     script.src = "https://unpkg.com/@vkid/sdk@<3.0.0/dist-sdk/umd/index.js";
+    script.onerror = () => showError("Не удалось загрузить VK ID.");
     script.onload = async () => {
-      const VKID = (window as unknown as { VKIDSDK?: VKIDSDK }).VKIDSDK;
-      if (!VKID) return;
+      try {
+        const VKID = (window as unknown as { VKIDSDK?: VKIDSDK }).VKIDSDK;
+        if (!VKID) throw new Error("VK ID SDK unavailable");
+        const response = await fetch("/api/auth/vkid", { signal, cache: "no-store" });
+        if (!response.ok) throw new Error("VK ID initialization failed");
+        const flow = await response.json();
+        if (signal.aborted) return;
 
-      const pkce = await generatePKCE();
-      codeVerifierStored = pkce.verifier;
+        VKID.Config.init({
+          ...flow,
+          responseMode: VKID.ConfigResponseMode.Callback,
+          source: VKID.ConfigSource.LOWCODE,
+        });
 
-      VKID.Config.init({
-        app: Number(process.env.NEXT_PUBLIC_VK_APP_ID),
-        redirectUrl: process.env.NEXT_PUBLIC_VK_REDIRECT_URI,
-        responseMode: VKID.ConfigResponseMode.Callback,
-        source: VKID.ConfigSource.LOWCODE,
-        scope: "wall photos groups",
-        codeChallenge: pkce.challenge,
-        codeChallengeMethod: "S256",
-      });
-
-      const oneTap = new VKID.OneTap();
-      if (!vkOneTapRef.current) return;
-
-      oneTap.render({
-        container: vkOneTapRef.current,
-        showAlternativeLogin: true,
-      })
-      .on(VKID.WidgetEvents.ERROR, (err) => {
-        console.error("VK ID error", err);
-        toast("Ошибка авторизации VK ID", "error");
-      })
-      .on(VKID.OneTapInternalEvents.LOGIN_SUCCESS, (payload) => {
-        const { code, device_id: deviceId } = payload as VKIDLoginPayload;
-
-        // Send code + our PKCE verifier to server for exchange
-        fetch("/api/auth/vkid", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code, device_id: deviceId, code_verifier: codeVerifierStored }),
-        })
-          .then(r => r.json())
-          .then(res => {
-            if (res.ok) window.location.reload();
-            else toast("Ошибка создания сессии", "error");
+        oneTap = new VKID.OneTap();
+        oneTap
+          .on(VKID.WidgetEvents.ERROR, () => {
+            if (!exchanging) showError("Не удалось выполнить вход через VK ID.");
           })
-          .catch(() => toast("Ошибка сети", "error"));
-      });
+          .on(VKID.OneTapInternalEvents.LOGIN_SUCCESS, async (payload) => {
+            if (signal.aborted || exchanging || !payload?.code) return;
+            const { code, device_id, state } = payload;
+            exchanging = true;
+            setLoginError("");
+            setLoginPending(true);
+            try {
+              await apiFetch("/api/auth/vkid", {
+                method: "POST",
+                signal,
+                body: JSON.stringify({ code, device_id, state: state ?? flow.state }),
+              });
+              const account = await apiFetch("/api/auth/me", { signal });
+              if (!signal.aborted) setUser(account);
+            } catch {
+              showError("Не удалось завершить вход через VK ID.");
+            } finally {
+              if (!signal.aborted) setLoginPending(false);
+            }
+          })
+          .render({ container, showAlternativeLogin: true });
+      } catch {
+        showError("Не удалось загрузить VK ID.");
+      }
     };
     document.body.appendChild(script);
 
-    return () => { script.remove(); };
-  }, [user, authChecked, toast, generatePKCE]);
+    return () => {
+      controller.abort();
+      script.remove();
+      oneTap?.close();
+    };
+  }, [user, authChecked, apiFetch, loginAttempt]);
 
   const logout = async () => {
     try {
@@ -774,6 +782,14 @@ export default function Home() {
           <h1>Публикации в VK</h1>
           <p className="login-subtitle">Войдите через VK ID, чтобы управлять постами и группами.</p>
           <div ref={vkOneTapRef} style={{width:"100%"}} />
+          {loginPending && <p className="login-subtitle" role="status">Завершаем вход…</p>}
+          {loginError && <div>
+            <p className="form-error" role="alert">{loginError}</p>
+            <button className="btn btn-secondary btn-sm" onClick={() => {
+              setLoginError("");
+              setLoginAttempt(attempt => attempt + 1);
+            }}>Обновить вход</button>
+          </div>}
         </div>
       </div>
     );

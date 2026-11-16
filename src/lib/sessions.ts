@@ -1,4 +1,3 @@
-import crypto from "crypto";
 import { db } from "./db";
 import { sessions } from "./db/schema";
 import { eq } from "drizzle-orm";
@@ -14,16 +13,17 @@ export interface Session {
 }
 
 export async function createSession(
+  store: Pick<typeof db, "insert">,
+  sessionId: string,
   tokenData: Record<string, unknown>,
   userInfo: Record<string, unknown>,
   deviceId: string,
-): Promise<string> {
-  const sessionId = crypto.randomBytes(32).toString("hex");
+): Promise<void> {
   const firstName = (userInfo.first_name as string) || "";
   const lastName = (userInfo.last_name as string) || "";
-  const expiresIn = (tokenData.expires_in as number) || 0;
+  const expiresIn = Number(tokenData.expires_in);
 
-  await db.insert(sessions).values({
+  await store.insert(sessions).values({
     id: sessionId,
     accessToken: (tokenData.access_token as string) || "",
     refreshToken: (tokenData.refresh_token as string) || "",
@@ -33,8 +33,6 @@ export async function createSession(
     userPhoto: (userInfo.photo_100 as string) || "",
     expiresAt: new Date(Date.now() + expiresIn * 1000),
   });
-
-  return sessionId;
 }
 
 export async function getSession(sessionId: string): Promise<Session | undefined> {

@@ -1,15 +1,11 @@
 import { NextResponse } from "next/server";
 import { createAuthRequest } from "@/lib/auth";
+import { setVkLoginContext } from "@/lib/vk-login";
 
-export async function GET() {
-  const { url, cookiePayload } = createAuthRequest();
-  const resp = NextResponse.redirect(url);
-  resp.cookies.set("vk_auth", JSON.stringify(cookiePayload), {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    maxAge: 600,
-    path: "/",
-  });
-  return resp;
+export function GET() {
+  const { url, state, codeVerifier } = createAuthRequest();
+  const response = NextResponse.redirect(url);
+  response.headers.set("Cache-Control", "no-store");
+  setVkLoginContext(response, state, codeVerifier);
+  return response;
 }

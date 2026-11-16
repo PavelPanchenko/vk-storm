@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -27,7 +27,7 @@ async function ephemeralPort() {
   return port;
 }
 
-test("публикации, отмена и изоляция аккаунтов", {
+test("вход через VK ID, публикации, отмена и изоляция аккаунтов", {
   skip: database ? false : "Задайте VKSTORM_TEST_DATABASE_URL",
   timeout: 90_000,
 }, async t => {
@@ -70,7 +70,10 @@ test("публикации, отмена и изоляция аккаунтов"
   const origin = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ["--import", "./tests/fixtures/vk-api.mjs", ".next/standalone/server.js"], {
     cwd,
-    env: { ...process.env, DATABASE_URL: url.href, UPLOADS_DIR: uploads, PORT: String(port), HOSTNAME: "127.0.0.1" },
+    env: {
+      ...process.env, DATABASE_URL: url.href, UPLOADS_DIR: uploads, PORT: String(port), HOSTNAME: "127.0.0.1",
+      VK_APP_ID: "1234", VK_APP_SECRET: "vkstorm-test", VK_REDIRECT_URI: `${origin}/api/auth/callback`,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stopped = once(child, "exit");
@@ -83,9 +86,10 @@ test("публикации, отмена и изоляция аккаунтов"
     await rm(uploads, { recursive: true, force: true });
   });
 
-  const request = (path, { account = "a", body, method, signal, headers } = {}) => fetch(origin + path, {
+  const request = (path, { account = "a", body, method, signal, headers, redirect } = {}) => fetch(origin + path, {
     method: method ?? (body ? "POST" : "GET"),
     signal,
+    redirect,
     headers: {
       ...headers,
       ...(account ? { Cookie: `session_id=test-${account}` } : {}),
@@ -100,6 +104,68 @@ test("публикации, отмена и изоляция аккаунтов"
     if (i === 49 || child.exitCode !== null) assert.fail(output);
     await delay(200);
   }
+
+  await t.test("OneTap и перенаправление завершают вход одной сессией, даже если пришли одновременно", async () => {
+    const start = await request("/api/auth/vkid", { account: null });
+    assert.equal(start.status, 200);
+    assert.equal(start.headers.get("cache-control"), "no-store");
+    const config = await start.json();
+    assert.equal(config.app, 1234);
+    assert.equal(config.redirectUrl, `${origin}/api/auth/callback`);
+    assert.equal(config.codeVerifier, undefined);
+    const [cookieHeader] = start.headers.getSetCookie();
+    const cookie = cookieHeader.split(";")[0];
+    const verifier = cookie.split("=")[1].split(".")[0];
+    assert.ok(cookie.startsWith(`vk_auth_${config.state}=`));
+    assert.match(cookieHeader, /Path=\/api\/auth;.*HttpOnly/i);
+    assert.equal(createHash("sha256").update(verifier).digest("base64url"), config.codeChallenge);
+
+    const body = { code: `test-login-${randomUUID()}`, device_id: "test-device", state: config.state };
+    const callbackPath = `/api/auth/callback?${new URLSearchParams(body)}`;
+    const invalid = await request("/api/auth/vkid", {
+      account: null, headers: { Cookie: `${cookie}0` }, body,
+    });
+    assert.equal(invalid.status, 400);
+    assert.deepEqual(await invalid.json(), { error: "invalid_state" });
+
+    const withFlow = { account: null, headers: { Cookie: cookie } };
+    const [oneTap, callback] = await Promise.all([
+      request("/api/auth/vkid", { ...withFlow, body }),
+      request(callbackPath, { ...withFlow, redirect: "manual" }),
+    ]);
+    assert.equal(oneTap.status, 200);
+    assert.equal(callback.status, 307);
+    assert.equal(callback.headers.get("location"), `${origin}/`);
+    const session = response => response.headers.getSetCookie()
+      .find(value => value.startsWith("session_id="))?.split(";")[0];
+    assert.match(session(oneTap), /^session_id=[a-f0-9]{64}$/);
+    assert.equal(session(callback), session(oneTap));
+    assert.equal((await sql`select id from sessions where user_id = '9001'`).length, 1);
+
+    const withSession = { account: null, headers: { Cookie: session(oneTap) } };
+    const me = await request("/api/auth/me", withSession);
+    assert.equal(me.status, 200);
+    assert.equal((await me.json()).name, "Тест VK");
+    const lateCallback = await request(callbackPath, { ...withSession, redirect: "manual" });
+    assert.equal(lateCallback.headers.get("location"), `${origin}/`);
+    assert.deepEqual(lateCallback.headers.getSetCookie(), []);
+  });
+
+  await t.test("вход с перенаправлением работает отдельно от OneTap", async () => {
+    const start = await request("/api/auth/login", { account: null, redirect: "manual" });
+    assert.equal(start.status, 307);
+    const destination = new URL(start.headers.get("location"));
+    assert.equal(destination.origin, "https://id.vk.com");
+    const state = destination.searchParams.get("state");
+    const [cookie] = start.headers.getSetCookie()[0].split(";");
+    assert.ok(cookie.startsWith(`vk_auth_${state}=`));
+    const body = { code: `test-login-${randomUUID()}`, device_id: "test-device", state };
+    const complete = await request(`/api/auth/callback?${new URLSearchParams(body)}`, {
+      account: null, headers: { Cookie: cookie }, redirect: "manual",
+    });
+    assert.equal(complete.headers.get("location"), `${origin}/`);
+    assert.ok(complete.headers.getSetCookie().some(value => value.startsWith("session_id=")));
+  });
 
   const history = async (account = "a") => {
     const response = await request("/api/publish/history", { account });

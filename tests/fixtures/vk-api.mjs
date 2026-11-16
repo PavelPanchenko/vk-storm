@@ -1,4 +1,5 @@
 const fetchOriginal = globalThis.fetch;
+const exchangedCodes = new Set();
 const attempts = new Map();
 const joinedGroups = new Set();
 const joinRequests = new Set();
@@ -7,6 +8,19 @@ const isMember = id => !membershipCases.has(id) || joinedGroups.has(id);
 
 globalThis.fetch = async (input, init) => {
   const url = new URL(input instanceof Request ? input.url : input);
+  if (url.hostname === "id.vk.com" && url.pathname === "/oauth2/auth") {
+    const params = new URLSearchParams(init?.body);
+    const code = params.get("code");
+    const state = params.get("state");
+    if (!code?.startsWith("test-login-") || !/^[a-f0-9]{32}$/.test(state)
+        || !/^[A-Za-z0-9_-]{43}$/.test(params.get("code_verifier")) || params.get("device_id") !== "test-device") {
+      return Response.json({ error: "invalid_request" }, { status: 400 });
+    }
+    if (exchangedCodes.has(code)) return Response.json({ error: "invalid_grant" }, { status: 400 });
+    exchangedCodes.add(code);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    return Response.json({ access_token: "fake-login-token", expires_in: 3600, user_id: 9001, state });
+  }
   if (url.hostname === "upload.vk.test" && url.pathname === "/video") {
     const payload = await new Response(init?.body, { headers: init?.headers }).formData();
     const video = payload.get("video_file");
@@ -28,6 +42,8 @@ globalThis.fetch = async (input, init) => {
   const params = new URLSearchParams(init?.body);
 
   switch (url.pathname) {
+    case "/method/users.get":
+      return Response.json({ response: [{ id: 9001, first_name: "Тест", last_name: "VK" }] });
     case "/method/groups.getById": {
       const groups = params.get("group_ids").split(",").map(screen_name => {
         const id = screen_name === "closed-test" ? 110 : Number(screen_name.replace("club", ""));
