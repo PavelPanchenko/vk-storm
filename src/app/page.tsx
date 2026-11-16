@@ -265,7 +265,8 @@ export default function Home() {
     type VKIDLoginPayload = { code: string; device_id: string; state?: string };
     type VKIDSDK = {
       Config: { init: (opts: Record<string, unknown>) => void };
-      ConfigResponseMode: { Callback: string };
+      ConfigAuthMode: { Redirect: string };
+      ConfigResponseMode: { Redirect: string };
       ConfigSource: { LOWCODE: string };
       WidgetEvents: { ERROR: string };
       OneTapInternalEvents: { LOGIN_SUCCESS: string };
@@ -290,7 +291,8 @@ export default function Home() {
 
         VKID.Config.init({
           ...flow,
-          responseMode: VKID.ConfigResponseMode.Callback,
+          mode: VKID.ConfigAuthMode.Redirect,
+          responseMode: VKID.ConfigResponseMode.Redirect,
           source: VKID.ConfigSource.LOWCODE,
         });
 
