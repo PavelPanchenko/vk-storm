@@ -4,6 +4,8 @@ import { extname } from "node:path";
 import { Readable } from "node:stream";
 import type { Session } from "./sessions";
 import { appendLog } from "./logger";
+import { readPrivateBlob } from "./blob-storage";
+import { privateBlobPath } from "./media-upload-config";
 import { resolveUploadPath } from "./storage";
 import { vkMethod } from "./vk-method";
 import {
@@ -37,6 +39,17 @@ function uploadRetryDelay(attempt: number): number {
   return 800 * (attempt + 1) + Math.floor(Math.random() * 400);
 }
 
+function isRetryableVkUploadError(e: unknown): boolean {
+  if (e instanceof Error && e.name === "TimeoutError") return true;
+  const status = (e as Error & { status?: number }).status;
+  if (status != null && RETRYABLE_UPLOAD_STATUS.has(status)) return true;
+  if (e instanceof Error) {
+    const msg = e.message;
+    if (msg.includes("пустой photo") || msg.includes("Неполный ответ VK upload server")) return true;
+  }
+  return false;
+}
+
 export type MediaUploadResult = {
   attachments: string[];
   errors: string[];
@@ -63,7 +76,7 @@ async function fetchWallUploadUrl(
   if (groupId != null) params.group_id = groupId;
 
   const serverCall = await vkMethod(sessionId, session, "photos.getWallUploadServer", params);
-  let currentSession = serverCall.session;
+  const currentSession = serverCall.session;
   const serverData = serverCall.data;
   if (serverData.error) {
     throw new Error(`Error ${serverData.error.error_code}: ${serverData.error.error_msg}`);
@@ -122,15 +135,18 @@ export async function uploadWallPhotosForPublish(
         await sleep(BETWEEN_VK_STEPS_MS);
 
         try {
-          uploadResult = await postPhotoToVkUploadServer(uploadUrl, blob, fileName);
+          const raw = await postPhotoToVkUploadServer(uploadUrl, blob, fileName);
+          parseVkPhotoUploadResult(raw);
+          uploadResult = raw;
           break;
         } catch (e) {
-          const status = (e as Error & { status?: number }).status;
-          const isTimeout = e instanceof Error && e.name === "TimeoutError";
-          const retryable =
-            isTimeout || (status != null && RETRYABLE_UPLOAD_STATUS.has(status));
-          if (retryable && attempt < MAX_UPLOAD_ATTEMPTS - 1) {
-            const reason = isTimeout ? "timeout" : `HTTP ${status}`;
+          if (isRetryableVkUploadError(e) && attempt < MAX_UPLOAD_ATTEMPTS - 1) {
+            const reason =
+              e instanceof Error && e.name === "TimeoutError"
+                ? "timeout"
+                : (e as Error & { status?: number }).status != null
+                  ? `HTTP ${(e as Error & { status?: number }).status}`
+                  : (e as Error).message;
             appendLog(
               "WARNING",
               `VK upload ${reason}, retry ${attempt + 2}/${MAX_UPLOAD_ATTEMPTS} (group ${groupId ?? "user"})`,
@@ -195,7 +211,15 @@ export async function uploadWallVideoForPublish(
   let contentType: string;
   let fileName: string;
 
-  if (videoUrl.startsWith("/uploads/")) {
+  const pathname = privateBlobPath(videoUrl);
+  if (pathname) {
+    const result = await readPrivateBlob(pathname);
+    if (!result) throw new Error("Файл видео не найден");
+    const ext = extname(pathname);
+    contentType = VIDEO_MIME[ext] || "video/mp4";
+    fileName = `video${ext}`;
+    videoStream = result.stream;
+  } else if (videoUrl.startsWith("/uploads/")) {
     const rel = videoUrl.slice("/uploads/".length);
     const abs = resolveUploadPath(rel);
     if (!abs) throw new Error("Некорректный путь к видео");

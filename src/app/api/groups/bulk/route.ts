@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
     added++;
   }
 
-  await appendLog("INFO", `Bulk import: added=${added}, skipped=${skipped}, errors=${errors.length}`);
+  await appendLog("INFO", `Bulk import: added=${added}, skipped=${skipped}, errors=${errors.length}`, result.session.user_id);
   return NextResponse.json({ added, skipped, errors });
 }
 
@@ -70,7 +70,7 @@ export async function DELETE(request: NextRequest) {
     deleted++;
   }
 
-  await appendLog("INFO", `Bulk delete: ${deleted} groups removed`);
+  await appendLog("INFO", `Bulk delete: ${deleted} groups removed`, result.session.user_id);
   return NextResponse.json({ deleted });
 }
 
@@ -95,6 +95,6 @@ export async function PATCH(request: NextRequest) {
     moved++;
   }
 
-  await appendLog("INFO", `Bulk move: ${moved} groups → ${category}`);
+  await appendLog("INFO", `Bulk move: ${moved} groups → ${category}`, result.session.user_id);
   return NextResponse.json({ moved });
 }

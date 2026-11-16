@@ -12,6 +12,7 @@ export async function GET() {
     rows.map(r => {
       const ps = pubStats[r.url];
       return {
+        id: r.id,
         url: r.url,
         name: r.url.replace(/\/$/, "").split("/").pop(),
         category: r.category,
@@ -38,6 +39,6 @@ export async function POST(request: NextRequest) {
   if (!url.startsWith("http")) return NextResponse.json({ detail: "URL должен начинаться с http:// или https://" }, { status: 400 });
 
   await addGroup(result.session.user_id, url, category, photo, membersCount);
-  await appendLog("INFO", `Group added: ${url} [${category}]`);
+  await appendLog("INFO", `Group added: ${url} [${category}]`, result.session.user_id);
   return NextResponse.json({ status: "ok" });
 }

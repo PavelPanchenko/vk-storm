@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { canReadAttachment } from "@/lib/media-access";
 import { requireSession } from "@/lib/api-auth";
 import { uploadWallVideoForPublish } from "@/lib/vk-media-upload";
 
@@ -14,6 +15,10 @@ export async function POST(request: NextRequest) {
 
   if (!videoUrl) {
     return NextResponse.json({ detail: "video_url required" }, { status: 400 });
+  }
+
+  if (typeof videoUrl !== "string" || !await canReadAttachment(auth.session.user_id, videoUrl)) {
+    return NextResponse.json({ detail: "Вложение недоступно" }, { status: 404 });
   }
 
   try {

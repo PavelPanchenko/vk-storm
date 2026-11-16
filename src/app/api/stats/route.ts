@@ -20,7 +20,7 @@ export async function GET() {
   const [counts] = await db
     .select({
       totalPublished: sql<number>`count(*) filter (where ${publishResults.success} = true)`,
-      totalErrors: sql<number>`count(*) filter (where ${publishResults.success} = false)`,
+      totalErrors: sql<number>`count(*) filter (where ${publishResults.status} = 'failed' or (${publishResults.status} is null and ${publishResults.success} = false))`,
     })
     .from(publishResults)
     .where(eq(publishResults.userId, result.session.user_id));
@@ -28,21 +28,11 @@ export async function GET() {
   const totalPublished = Number(counts?.totalPublished || 0);
   const totalErrors = Number(counts?.totalErrors || 0);
 
-  // Recent activity from logs
-  const lines = await readLogs();
-  const recentActivity: { level: string; message: string; time: string }[] = [];
-
-  for (const line of lines.slice(-10)) {
-    let level = "info";
-    if (line.includes("ERROR")) level = "error";
-    else if (line.includes("Published") || line.includes("Успешно") || line.includes("success")) level = "success";
-    else if (line.includes("WARNING")) level = "warning";
-
-    const timeMatch = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
-    const msg = line.replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},?\d* - \w+ - /, "");
-    recentActivity.push({ level, message: msg, time: timeMatch?.[1] || "" });
-  }
-  recentActivity.reverse();
+  const recentActivity = (await readLogs(result.session.user_id, undefined, 10)).map((row) => ({
+    level: row.level.toLowerCase(),
+    message: row.message,
+    time: row.createdAt.toISOString(),
+  }));
 
   return NextResponse.json({
     total_posts: totalPosts,

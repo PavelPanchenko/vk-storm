@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { canReadAttachment } from "@/lib/media-access";
 import { requireSession } from "@/lib/api-auth";
 import { loadImageBlob, parseVkPhotoUploadResult } from "@/lib/vk-image-blob";
 
@@ -18,6 +19,10 @@ export async function POST(request: NextRequest) {
 
   if (!uploadUrl || !imageUrl) {
     return NextResponse.json({ detail: "upload_url and image_url required" }, { status: 400 });
+  }
+
+  if (typeof imageUrl !== "string" || !await canReadAttachment(result.session.user_id, imageUrl)) {
+    return NextResponse.json({ detail: "Вложение недоступно" }, { status: 404 });
   }
 
   try {

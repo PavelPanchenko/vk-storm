@@ -1,16 +1,35 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback, useId, useMemo } from "react";
 import Image from "next/image";
-import { vkGroupPathKey, vkNumericGroupIdFromUrl } from "@/lib/vk-group-url";
+import { mediaUploadConfig } from "@/lib/media-upload-config";
+import type { HistoryBatch, PublishEvent } from "@/lib/publish-status";
+import { PublishHistory } from "./publish-history";
+import { isNotSubscribed, PublishPanel, type PublishProgress } from "./publish-panel";
 
 type Theme = "dark" | "light";
 
 async function uploadFile(
   file: File,
   kind: "image" | "video",
+  direct: boolean,
   onProgress: (pct: number) => void,
 ): Promise<{ url: string }> {
+  if (direct) {
+    const { extensions, maxBytes } = mediaUploadConfig[kind];
+    if (!Object.hasOwn(extensions, file.type)) throw new Error("Неподдерживаемый формат вложения");
+    if (file.size > maxBytes) throw new Error(`Файл слишком большой. Лимит: ${maxBytes / 1024 ** 2} МБ`);
+    const { upload } = await import("@vercel/blob/client");
+    const pathname = `blob/${crypto.randomUUID()}.${extensions[file.type]}`;
+    await upload(pathname, file, {
+      access: "private",
+      handleUploadUrl: "/api/blob/upload",
+      clientPayload: kind,
+      multipart: file.size > 5 * 1024 * 1024,
+      onUploadProgress: ({ percentage }) => onProgress(Math.round(percentage)),
+    });
+    return { url: `/uploads/${pathname}` };
+  }
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.upload.onprogress = (e) => {
@@ -38,27 +57,35 @@ async function uploadFile(
 }
 
 /* ===== TYPES ===== */
-interface User { user_id: string; name: string; avatar: string }
+interface User { user_id: string; name: string; avatar: string; direct_blob_upload?: boolean }
 interface Post { name: string; text: string; image_count: number; images: string[]; videos: string[] }
-interface Group { url: string; name: string; category: string; photo: string; members_count: number; status: string; last_published: string | null; total_published: number }
+interface Group { id: number; url: string; name: string; category: string; photo: string; members_count: number; status: string; last_published: string | null; total_published: number }
 interface ToastItem { id: number; message: string; type: string }
 interface Stats {
   total_posts: number; total_groups: number; total_published: number; total_errors: number;
   recent_activity: { level: string; message: string; time: string }[];
 }
-interface HistoryBatch {
-  batchId: string; postName: string; postText: string; createdAt: string;
-  totalGroups: number; successCount: number; failedCount: number;
-  groups: { groupUrl: string; groupName: string; success: boolean; error: string | null; createdAt: string }[];
-}
-
+const views = ["dashboard", "posts", "groups", "publish", "history", "parser", "logs"];
 let toastId = 0;
 
 /* ===== MAIN ===== */
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
-  const [tab, setTab] = useState("dashboard");
+  const [tab, setTabState] = useState("dashboard");
+  const setTab = useCallback((view: string) => {
+    if (window.location.hash !== `#${view}`) window.history.pushState(null, "", `#${view}`);
+    setTabState(view);
+  }, []);
+  useEffect(() => {
+    const syncView = () => {
+      const requested = window.location.hash.slice(1);
+      setTabState(views.includes(requested) ? requested : "dashboard");
+    };
+    syncView();
+    window.addEventListener("hashchange", syncView);
+    return () => window.removeEventListener("hashchange", syncView);
+  }, []);
   const [theme, setTheme] = useState<Theme>("dark");
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -129,20 +156,17 @@ export default function Home() {
   // Publish
   const [publishPost, setPublishPost] = useState("");
   const [publishGroups, setPublishGroups] = useState<Set<number>>(new Set());
-  const [publishFilter, setPublishFilter] = useState<"all" | "new" | "sent">("all");
-  const [expandedPubCats, setExpandedPubCats] = useState<Set<string>>(new Set());
-  const [postedGroupUrls, setPostedGroupUrls] = useState<Set<string>>(new Set());
+  const [postedGroups, setPostedGroups] = useState<{ postName: string; urls: Set<string> } | null>(null);
   const [publishing, setPublishing] = useState(false);
-  const [publishProgress, setPublishProgress] = useState({ progress: 0, status: "", done: false, success: 0, failed: 0, errors: [] as { group: string; error: string; url?: string }[] });
-  const [showProgress, setShowProgress] = useState(false);
-  const [showResults, setShowResults] = useState(false);
+  const [publishProgress, setPublishProgress] = useState<PublishProgress>({ progress: 0, status: "", done: false, success: 0, suggested: 0, failed: 0, unknown: 0, errors: [] });
   const [showSubscribeAllPrompt, setShowSubscribeAllPrompt] = useState(false);
   const [subscribePromptSeenKey, setSubscribePromptSeenKey] = useState("");
   const [joiningCommunities, setJoiningCommunities] = useState(false);
 
   // History
   const [history, setHistory] = useState<HistoryBatch[]>([]);
-  const [historyExpanded, setHistoryExpanded] = useState<Set<string>>(new Set());
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
 
 
   /* ===== TOAST ===== */
@@ -298,8 +322,12 @@ export default function Home() {
   }, [user, authChecked, toast, generatePKCE]);
 
   const logout = async () => {
-    try { await apiFetch("/api/auth/logout", { method: "POST" }); } catch {}
-    setUser(null);
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST" });
+      window.location.assign("/");
+    } catch (error) {
+      toast((error as Error).message, "error");
+    }
   };
 
   /* ===== DATA LOADING ===== */
@@ -308,12 +336,23 @@ export default function Home() {
   const loadGroups = useCallback(async () => { try { const d = await apiFetch("/api/groups"); setGroups(Array.isArray(d) ? d : d.groups || []); } catch {} }, [apiFetch]);
   const loadLogs = useCallback(async () => { try { const d = await apiFetch(`/api/logs?level=${logLevel}`); setLogs(d.lines || []); } catch {} }, [apiFetch, logLevel]);
   const loadBlacklist = useCallback(async () => { try { const d = await apiFetch("/api/blacklist"); setBlacklistedUrls(new Set((d as { url: string }[]).map((b) => b.url))); } catch {} }, [apiFetch]);
-  const loadHistory = useCallback(async () => { try { const d = await apiFetch("/api/publish/history"); setHistory(Array.isArray(d) ? d : []); } catch {} }, [apiFetch]);
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      const batches = await apiFetch("/api/publish/history");
+      setHistory(Array.isArray(batches) ? batches : []);
+    } catch (error) {
+      setHistoryError(`Не удалось загрузить историю: ${(error as Error).message}`);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [apiFetch]);
 
 
   useEffect(() => {
     if (!user) return;
-    if (tab === "dashboard") loadStats();
+    if (tab === "dashboard") { loadStats(); loadHistory(); }
     else if (tab === "posts") loadPosts();
     else if (tab === "groups") loadGroups();
     else if (tab === "logs") loadLogs();
@@ -323,11 +362,13 @@ export default function Home() {
   }, [user, tab, loadStats, loadPosts, loadGroups, loadLogs, loadBlacklist, loadHistory]);
 
   useEffect(() => {
-    if (!publishPost) { setPostedGroupUrls(new Set()); return; }
-    apiFetch(`/api/publish/posted-groups?postName=${encodeURIComponent(publishPost)}`)
-      .then((urls: string[]) => setPostedGroupUrls(new Set(urls)))
-      .catch(() => setPostedGroupUrls(new Set()));
-  }, [publishPost, apiFetch]);
+    if (!publishPost || publishing || tab !== "publish") return;
+    const controller = new AbortController();
+    apiFetch(`/api/publish/posted-groups?postName=${encodeURIComponent(publishPost)}`, { signal: controller.signal })
+      .then((urls: string[]) => setPostedGroups({ postName: publishPost, urls: new Set(urls) }))
+      .catch(() => { if (!controller.signal.aborted) setPostedGroups(null); });
+    return () => controller.abort();
+  }, [publishPost, publishing, tab, apiFetch]);
 
   /* ===== POST CRUD ===== */
   const uploadFilesToBlob = useCallback(async (files: File[], _postSlug: string, kind: "image" | "video"): Promise<string[]> => {
@@ -336,7 +377,7 @@ export default function Home() {
       const f = files[i];
       setUploadProgress({ name: f.name, pct: 0 });
       try {
-        const { url } = await uploadFile(f, kind, (pct) => setUploadProgress({ name: f.name, pct }));
+        const { url } = await uploadFile(f, kind, Boolean(user?.direct_blob_upload), (pct) => setUploadProgress({ name: f.name, pct }));
         urls.push(url);
       } catch (e) {
         setUploadProgress(null);
@@ -348,7 +389,7 @@ export default function Home() {
     }
     setUploadProgress(null);
     return urls;
-  }, []);
+  }, [user?.direct_blob_upload]);
 
   const createPost = async () => {
     setPostNameError("");
@@ -421,8 +462,8 @@ export default function Home() {
     } catch (e) { toast((e as Error).message, "error"); }
   };
 
-  const deleteGroup = async (index: number) => {
-    try { await apiFetch(`/api/groups/${index}`, { method: "DELETE" }); toast("Группа удалена", "success"); loadGroups(); } catch {}
+  const deleteGroup = async (id: number) => {
+    try { await apiFetch(`/api/groups/${id}`, { method: "DELETE" }); toast("Группа удалена", "success"); loadGroups(); } catch {}
   };
 
   const bulkImportGroups = async () => {
@@ -444,16 +485,16 @@ export default function Home() {
     try { toast("Проверка групп...", "info"); await apiFetch("/api/groups/check", { method: "POST" }); toast("Проверка завершена", "success"); loadGroups(); } catch {}
   };
 
-  const changeGroupCategory = async (index: number, category: string) => {
+  const changeGroupCategory = async (id: number, category: string) => {
     try {
-      await apiFetch(`/api/groups/${index}`, { method: "PATCH", body: JSON.stringify({ category }) });
+      await apiFetch(`/api/groups/${id}`, { method: "PATCH", body: JSON.stringify({ category }) });
       loadGroups();
     } catch (e) { toast((e as Error).message, "error"); }
   };
 
   const massMoveGroups = async (category: string) => {
     if (!category.trim() || groupSelectedIds.size === 0) return;
-    const urls = Array.from(groupSelectedIds).map(i => groups[i]?.url).filter(Boolean);
+    const urls = groups.filter(g => groupSelectedIds.has(g.id)).map(g => g.url);
     try {
       const res = await apiFetch("/api/groups/bulk", { method: "PATCH", body: JSON.stringify({ urls, category: category.trim() }) });
       toast(`Перемещено: ${res.moved}`, "success");
@@ -465,7 +506,7 @@ export default function Home() {
 
   const massDeleteGroups = async () => {
     if (groupSelectedIds.size === 0) return;
-    const urls = Array.from(groupSelectedIds).map(i => groups[i]?.url).filter(Boolean);
+    const urls = groups.filter(g => groupSelectedIds.has(g.id)).map(g => g.url);
     try {
       const res = await apiFetch("/api/groups/bulk", { method: "DELETE", body: JSON.stringify({ urls }) });
       toast(`Удалено: ${res.deleted}`, "success");
@@ -474,15 +515,6 @@ export default function Home() {
     setGroupSelectedIds(new Set());
     loadGroups();
   };
-
-  const vkProxyCall = useCallback(async (method: string, params: Record<string, string | number>, signal?: AbortSignal): Promise<Record<string, unknown>> => {
-    const data = await apiFetch("/api/vk/call", { method: "POST", body: JSON.stringify({ method, params }), signal });
-    if (data.error) {
-      const err = data.error as Record<string, unknown>;
-      throw new Error(`VK API Error ${err.error_code}: ${err.error_msg}`);
-    }
-    return data.response as Record<string, unknown>;
-  }, [apiFetch]);
 
   const fetchFriendsBatch = useCallback(async (groupIds: string[], signal?: AbortSignal): Promise<Record<string, number>> => {
     if (!user || groupIds.length === 0) return {};
@@ -520,7 +552,6 @@ export default function Home() {
   const existingGroupUrls = new Map(groups.map(g => [g.url, g]));
 
   /* ===== PARSER ===== */
-  const vkApiFetch = vkProxyCall;
 
   const parserCitySearch = async (q: string) => {
     setParserCity(q);
@@ -612,243 +643,105 @@ export default function Home() {
   };
 
   const parserMoveCategory = async (groupUrl: string, newCategory: string) => {
-    const idx = groups.findIndex(g => g.url === groupUrl);
-    if (idx < 0) return;
+    const group = groups.find(g => g.url === groupUrl);
+    if (!group) return;
     try {
-      await apiFetch(`/api/groups/${idx}`, { method: "PATCH", body: JSON.stringify({ category: newCategory }) });
+      await apiFetch(`/api/groups/${group.id}`, { method: "PATCH", body: JSON.stringify({ category: newCategory }) });
       toast("Категория обновлена", "success");
       loadGroups();
     } catch (e) { toast((e as Error).message, "error"); }
   };
 
   /* ===== PUBLISH ===== */
-  const isNotSubscribedPublishError = useCallback((error: string) => {
-    return /не подписан|not subscribed|not a member|isMember/i.test(error);
-  }, []);
   const getNotSubscribedCommunityUrls = useCallback(() => {
     return Array.from(new Set(
       publishProgress.errors
-        .filter(e => e.url && isNotSubscribedPublishError(e.error))
+        .filter(e => e.url && isNotSubscribed(e.error))
         .map(e => e.url as string),
     ));
-  }, [publishProgress.errors, isNotSubscribedPublishError]);
-
-  const togglePubGroup = (idx: number) => {
-    setPublishGroups(prev => { const n = new Set(prev); if (n.has(idx)) n.delete(idx); else n.add(idx); return n; });
-  };
-
-  const getFilteredIndices = useCallback(() => {
-    return groups.map((g, i) => ({ url: g.url, idx: i })).filter(g => {
-      if (publishFilter === "new") return !postedGroupUrls.has(g.url);
-      if (publishFilter === "sent") return postedGroupUrls.has(g.url);
-      return true;
-    }).map(g => g.idx);
-  }, [groups, publishFilter, postedGroupUrls]);
-
-  const toggleAllPubGroups = (checked: boolean) => {
-    const indices = getFilteredIndices();
-    setPublishGroups(checked ? new Set(indices) : new Set());
-  };
+  }, [publishProgress.errors]);
 
   const publishCancelRef = useRef(false);
   const publishingRef = useRef(false);
 
   const publishAbortRef = useRef<AbortController | null>(null);
 
-  const startPublish = async () => {
+  const startPublish = async (retry?: HistoryBatch) => {
     if (publishingRef.current) return;
-    if (!publishPost) { toast("Выберите пост", "warning"); return; }
-    if (publishGroups.size === 0) { toast("Выберите группы", "warning"); return; }
-    if (!user) { toast("Требуется авторизация", "error"); return; }
+    const postName = retry?.postName ?? publishPost;
+    const groupIds = groups.filter(g => publishGroups.has(g.id)).map(g => g.id);
+    if (!postName || (!retry && groupIds.length === 0)) return;
 
-    const post = posts.find(p => p.name === publishPost);
-    if (!post) { toast("Пост не найден", "error"); return; }
-
-    const selectedUrls = Array.from(publishGroups).map(i => groups[i]?.url).filter(Boolean);
-    if (selectedUrls.length === 0) { toast("Не выбраны группы", "warning"); return; }
-
-    setPublishing(true);
     publishingRef.current = true;
-    setShowProgress(true);
-    setShowResults(false);
     publishCancelRef.current = false;
-    const abortCtrl = new AbortController();
-    publishAbortRef.current = abortCtrl;
+    setPublishing(true);
+    setPostedGroups(null);
+    setTab("publish");
+    if (retry) {
+      setPublishPost(postName);
+      setPublishGroups(new Set());
+    }
 
-    const progress = { progress: 0, status: "Проверка групп...", done: false, success: 0, failed: 0, errors: [] as { group: string; error: string; url?: string }[] };
+    const abort = new AbortController();
+    publishAbortRef.current = abort;
+    const progress: PublishProgress = { progress: 0, status: "Проверка групп…", done: false, success: 0, suggested: 0, failed: 0, unknown: 0, errors: [] };
     setPublishProgress({ ...progress });
-
-    const batchId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const publishResults: { postName: string; groupUrl: string; groupName?: string; success: boolean; error?: string }[] = [];
-
     try {
-      // 1. Проверка групп через groups.getById с маппингом по screen_name и числовому id.
-      const screenNameToUrl = new Map(
-        selectedUrls.map((u) => [vkGroupPathKey(u), u] as const).filter(([k]) => k.length > 0),
-      );
-      const idToUrl = new Map<number, string>();
-      for (const u of selectedUrls) {
-        const nid = vkNumericGroupIdFromUrl(u);
-        if (nid != null) idToUrl.set(nid, u);
-      }
-      const groupsResp = await vkApiFetch("groups.getById", { group_ids: Array.from(screenNameToUrl.keys()).join(","), fields: "can_post,can_suggest" });
-      const groupsContainer = groupsResp as { groups?: Record<string, unknown>[] };
-      const groupsList: Record<string, unknown>[] = Array.isArray(groupsContainer.groups)
-        ? groupsContainer.groups
-        : (Array.isArray(groupsResp) ? (groupsResp as Record<string, unknown>[]) : []);
-      const validGroups = groupsList.map((g) => {
-        const id = Number(g.id);
-        const sn = String(g.screen_name ?? "").toLowerCase();
-        const url = screenNameToUrl.get(sn) || idToUrl.get(id) || "";
-        return {
-          id,
-          name: (g.name || g.screen_name) as string,
-          url,
-          can_post: Boolean(g.can_post),
-        };
-      }).filter((g) => g.url);
-
-      if (validGroups.length === 0) {
-        progress.status = "Нет доступных групп"; progress.done = true;
-        setPublishProgress({ ...progress }); setShowResults(true);
-        return;
+      const response = await fetch("/api/publish/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batchId: crypto.randomUUID(), postName, groupIds, retryOf: retry?.batchId }),
+        signal: abort.signal,
+      });
+      if (!response.ok || !response.body) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.detail ?? `Ошибка HTTP ${response.status}`);
       }
 
-      // 2. Видео загружается один раз; фото — отдельно для каждой группы в batch.
-      const hasImages = post.images && post.images.length > 0;
-      const hasVideos = post.videos && post.videos.length > 0;
-      let videoAttachments: string[] = [];
-
-      if (hasVideos && !publishCancelRef.current) {
-        progress.status = "Загрузка видео...";
-        progress.progress = 0;
-        setPublishProgress({ ...progress });
-
-        const mediaResp = await apiFetch("/api/publish/upload-media", {
-          method: "POST",
-          body: JSON.stringify({
-            videos: post.videos,
-            name: publishPost,
-          }),
-          signal: abortCtrl.signal,
-        }) as { attachments?: string[]; errors?: string[] };
-        videoAttachments = Array.isArray(mediaResp.attachments) ? mediaResp.attachments : [];
-        for (const err of Array.isArray(mediaResp.errors) ? mediaResp.errors : []) {
-          progress.errors.push({ group: "—", error: err });
-        }
-        if (videoAttachments.length === 0) {
-          progress.status = "Не удалось загрузить видео — публикация отменена";
-          progress.done = true;
-          setPublishProgress({ ...progress });
-          setShowResults(true);
-          return;
-        }
-      }
-
-      if (publishCancelRef.current) {
-        progress.status = "Отменено";
-        progress.done = true;
-        setPublishProgress({ ...progress });
-        setShowResults(true);
-        return;
-      }
-
-      // 3. Server-side: фото на стену каждой группы + wall.post через SSE.
-      const total = validGroups.length;
-      progress.status = hasImages ? `Фото и публикация (0/${total})` : `Публикация (0/${total})`;
-      progress.progress = hasVideos ? 10 : 0;
-      setPublishProgress({ ...progress });
-
+      setPublishGroups(new Set());
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = "";
+      let finished = false;
       try {
-        const resp = await fetch("/api/publish/batch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            postText: post.text,
-            imageUrls: hasImages ? post.images : [],
-            videoAttachments,
-            groups: validGroups.map(g => ({ id: g.id, url: g.url, name: g.name })),
-          }),
-          signal: abortCtrl.signal,
-        });
-
-        if (!resp.ok || !resp.body) {
-          const errText = await resp.text().catch(() => "");
-          throw new Error(`Batch publish failed: ${resp.status} ${errText}`.slice(0, 300));
-        }
-
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          let idx: number;
-          while ((idx = buffer.indexOf("\n\n")) !== -1) {
-            const chunk = buffer.slice(0, idx);
-            buffer = buffer.slice(idx + 2);
-            const dataLine = chunk.split("\n").find(l => l.startsWith("data: "));
-            if (!dataLine) continue;
-            try {
-              const event = JSON.parse(dataLine.slice(6));
-              if (event.type === "result") {
-                if (event.success) {
-                  progress.success++;
-                  publishResults.push({ postName: publishPost, groupUrl: event.group.url, groupName: event.group.name, success: true });
-                } else {
-                  progress.failed++;
-                  progress.errors.push({ group: event.group.name, error: event.error || "Неизвестная ошибка", url: event.group.url });
-                  publishResults.push({ postName: publishPost, groupUrl: event.group.url, groupName: event.group.name, success: false, error: event.error });
-                }
-                progress.status = hasImages
-                  ? `Фото и публикация (${event.completed}/${event.total})`
-                  : `Публикация (${event.completed}/${event.total})`;
-                const base = hasVideos ? 10 : 0;
-                progress.progress = Math.round(base + (event.completed / event.total) * (100 - base));
-                setPublishProgress({ ...progress });
-              }
-            } catch {
-              // ignore malformed chunk
+          buffer += value;
+          let boundary: number;
+          while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            if (!frame.startsWith("data: ")) continue;
+            const event = JSON.parse(frame.slice(6)) as PublishEvent;
+            if (event.type === "phase") progress.status = event.message;
+            if (event.type === "result") {
+              if (event.status === "published") progress.success++;
+              if (event.status === "suggested") progress.suggested++;
+              if (event.status === "failed") progress.failed++;
+              if (event.status === "unknown") progress.unknown++;
+              if (event.error) progress.errors.push({ group: event.group.name, error: event.error, url: event.group.url });
+              progress.progress = Math.round(event.completed / event.total * 100);
+              progress.status = `Обработано ${event.completed} из ${event.total}`;
             }
+            if (event.type === "done") finished = true;
+            setPublishProgress({ ...progress });
           }
         }
-      } catch (e) {
-        if (!publishCancelRef.current) {
-          progress.errors.push({ group: "—", error: `Ошибка стрима: ${(e as Error).message}` });
-        }
+      } finally {
+        reader.releaseLock();
       }
-
-      const cancelled = publishCancelRef.current;
-      if (cancelled) {
-        progress.status = "Отменено";
-      } else {
-        progress.progress = 100;
-        progress.status = "Готово!";
-      }
+      progress.status = finished ? "Отправка завершена" : "Отправка прервалась. Результаты доступны в истории";
+    } catch (error) {
+      progress.status = publishCancelRef.current
+        ? "Отмена запрошена. Проверьте итог в истории"
+        : `Отправка прервалась: ${(error as Error).message}. Проверьте историю`;
+    } finally {
       progress.done = true;
       setPublishProgress({ ...progress });
-      setShowResults(true);
-
-      if (publishResults.length > 0) {
-        try {
-          await apiFetch("/api/publish/results", { method: "POST", body: JSON.stringify({ batchId, postText: post.text, results: publishResults }) });
-        } catch {}
-      }
-    } catch (e) {
-      if (publishCancelRef.current && (e as Error).name === "AbortError") {
-        progress.status = "Отменено";
-      } else {
-        progress.status = `Ошибка: ${(e as Error).message}`;
-      }
-      progress.done = true;
-      setPublishProgress({ ...progress }); setShowResults(true);
-    } finally {
       publishAbortRef.current = null;
       publishingRef.current = false;
       setPublishing(false);
+      loadHistory();
     }
   };
 
@@ -863,17 +756,17 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (!showResults || publishing) return;
+    if (!publishProgress.done || publishing) return;
     const urls = getNotSubscribedCommunityUrls();
     if (urls.length === 0) return;
     const key = urls.slice().sort().join("|");
     if (!key || key === subscribePromptSeenKey) return;
     setSubscribePromptSeenKey(key);
     setShowSubscribeAllPrompt(true);
-  }, [showResults, publishing, getNotSubscribedCommunityUrls, subscribePromptSeenKey]);
+  }, [publishProgress.done, publishing, getNotSubscribedCommunityUrls, subscribePromptSeenKey]);
 
   /* ===== RENDER ===== */
-  if (!authChecked) return null;
+  if (!authChecked) return <div id="login-screen" role="status">Загрузка VK Storm…</div>;
 
   if (!user) {
     return (
@@ -889,13 +782,13 @@ export default function Home() {
 
   return (
     <>
-      <button className="hamburger" onClick={() => setSidebarOpen(!sidebarOpen)}>
+      <button className="hamburger" aria-label="Меню" aria-expanded={sidebarOpen} aria-controls="main-sidebar" onClick={() => setSidebarOpen(!sidebarOpen)}>
         <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
       {sidebarOpen && <div className="sidebar-overlay open" onClick={() => setSidebarOpen(false)} />}
 
       <div className="app-layout">
-        <aside className={`sidebar${sidebarOpen ? " open" : ""}`}>
+        <aside id="main-sidebar" className={`sidebar${sidebarOpen ? " open" : ""}`}>
           <div className="sidebar-header"><div className="sidebar-brand">VK <span>Storm</span></div></div>
           <nav className="sidebar-nav">
             {([
@@ -907,9 +800,14 @@ export default function Home() {
               ["parser", "Парсер", <><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></>],
               ["logs", "Логи", <><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></>],
             ] as [string, string, React.ReactNode][]).map(([id, label, icon]) => (
-              <div key={id} className={`nav-item${tab === id ? " active" : ""}`} onClick={() => { setTab(id); setSidebarOpen(false); }}>
-                <svg viewBox="0 0 24 24">{icon}</svg>{label}
-              </div>
+              <a href={`#${id}`} key={id} aria-current={tab === id ? "page" : undefined} className={`nav-item${tab === id ? " active" : ""}`} onClick={event => {
+                if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                event.preventDefault();
+                setTab(id);
+                setSidebarOpen(false);
+              }}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">{icon}</svg>{label}
+              </a>
             ))}
           </nav>
           <div className="sidebar-footer">
@@ -934,18 +832,24 @@ export default function Home() {
           {/* Dashboard */}
           {tab === "dashboard" && (
             <div>
-              <h1 className="page-title">Главная</h1>
+              <div className="toolbar dashboard-heading"><h1 className="page-title">Главная</h1><div className="toolbar-spacer"/><button className="btn btn-primary" onClick={() => setTab("publish")}>Новая публикация</button></div>
               <div className="stats-grid">
-                {[["blue","Всего постов",stats?.total_posts],["green","Всего групп",stats?.total_groups],["orange","Опубликовано",stats?.total_published],["red","Ошибки",stats?.total_errors]].map(([cls,label,val]) => (
+                {[["blue","Всего постов",stats?.total_posts],["green","Всего групп",stats?.total_groups],["orange","Отправлено",stats?.total_published],["red","Ошибки",stats?.total_errors]].map(([cls,label,val]) => (
                   <div key={cls as string} className={`stat-card ${cls}`}><div className="stat-label">{label as string}</div><div className="stat-value">{val ?? "--"}</div></div>
                 ))}
               </div>
+              <div className="toolbar dashboard-heading">
+                <h2 className="page-title">Последние публикации</h2>
+                <div className="toolbar-spacer"/>
+                {history.length > 0 && <button className="btn btn-secondary btn-sm" onClick={() => setTab("history")}>Вся история</button>}
+              </div>
+              <PublishHistory batches={history.slice(0, 3)} busy={publishing} loading={historyLoading} error={historyError} />
               <h2 className="page-title" style={{fontSize:18}}>Последняя активность</h2>
               <div className="activity-list">
                 {!stats?.recent_activity?.length ? <div className="empty-state"><p>Нет данных</p></div> :
                   stats.recent_activity.map((a,i) => {
                     const c: Record<string,string> = {success:"var(--success)",error:"var(--error)",warning:"var(--warning)",info:"var(--accent)"};
-                    return <div key={i} className="activity-item"><div className="activity-dot" style={{background:c[a.level]||c.info}}/><span>{a.message}</span><span className="activity-time">{a.time}</span></div>;
+                    return <div key={i} className="activity-item"><div className="activity-dot" style={{background:c[a.level]||c.info}}/><span>{a.message}</span><time className="activity-time" dateTime={a.time}>{new Date(a.time).toLocaleString("ru-RU")}</time></div>;
                   })}
               </div>
             </div>
@@ -1015,8 +919,8 @@ export default function Home() {
                   <label style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:13,cursor:"pointer"}}>
                     <input type="checkbox" checked={groupSelectedIds.size === groups.filter(g => categoryFilter === "all" || g.category === categoryFilter).length && groupSelectedIds.size > 0} onChange={e => {
                       if (e.target.checked) {
-                        const filtered = groups.map((g, i) => ({ g, i })).filter(({ g }) => categoryFilter === "all" || g.category === categoryFilter);
-                        setGroupSelectedIds(new Set(filtered.map(({ i }) => i)));
+                        const filtered = groups.filter(g => categoryFilter === "all" || g.category === categoryFilter);
+                        setGroupSelectedIds(new Set(filtered.map(g => g.id)));
                       } else setGroupSelectedIds(new Set());
                     }} style={{accentColor:"var(--accent)"}}/>
                     <span>Выбрать все</span>
@@ -1032,9 +936,8 @@ export default function Home() {
                 </div>
               )}
               <div className="groups-list">
-                {groups.length===0 ? <div className="empty-state"><p>Нет групп</p></div> :
+                {groups.length===0 ? <div className="empty-state"><p>Нет групп</p><button className="btn btn-primary" onClick={() => setShowAddGroup(true)}>Добавить первую группу</button></div> :
                   groups.filter(g => categoryFilter === "all" || g.category === categoryFilter).map((g) => {
-                    const realIndex = groups.indexOf(g);
                     const cats = Array.from(new Set(groups.map(gr => gr.category)));
                     const timeSince = (dateStr: string | null) => {
                       if (!dateStr) return null;
@@ -1046,8 +949,8 @@ export default function Home() {
                       return `${Math.floor(days / 7)} нед. назад`;
                     };
                     return (
-                      <div key={realIndex} className="group-card">
-                        <input type="checkbox" checked={groupSelectedIds.has(realIndex)} onChange={() => setGroupSelectedIds(prev => { const n = new Set(prev); if (n.has(realIndex)) n.delete(realIndex); else n.add(realIndex); return n; })} style={{accentColor:"var(--accent)",width:16,height:16,flexShrink:0,cursor:"pointer"}}/>
+                      <div key={g.id} className="group-card">
+                        <input type="checkbox" checked={groupSelectedIds.has(g.id)} onChange={() => setGroupSelectedIds(prev => { const n = new Set(prev); if (n.has(g.id)) n.delete(g.id); else n.add(g.id); return n; })} style={{accentColor:"var(--accent)",width:16,height:16,flexShrink:0,cursor:"pointer"}}/>
                         {g.photo
                           ? <Image src={g.photo} alt="" width={40} height={40} unoptimized style={{borderRadius:10,objectFit:"cover",flexShrink:0}}/>
                           : <div className={`status-dot ${g.status==="ok"?"green":g.status==="error"?"red":"gray"}`}/>}
@@ -1064,10 +967,10 @@ export default function Home() {
                             )}
                           </div>
                         </div>
-                        <select className="select" value={g.category} onChange={e => changeGroupCategory(realIndex, e.target.value)} onClick={e => e.stopPropagation()} style={{width:"auto",minWidth:100,fontSize:12,padding:"4px 8px"}}>
+                        <select className="select" value={g.category} onChange={e => changeGroupCategory(g.id, e.target.value)} onClick={e => e.stopPropagation()} style={{width:"auto",minWidth:100,fontSize:12,padding:"4px 8px"}}>
                           {cats.map(c => <option key={c} value={c}>{c}</option>)}
                         </select>
-                        <button className="btn btn-danger btn-sm" onClick={() => openConfirmDialog("Удалить группу?",g.name,() => deleteGroup(realIndex))}>
+                        <button className="btn btn-danger btn-sm" onClick={() => openConfirmDialog("Удалить группу?",g.name,() => deleteGroup(g.id))}>
                           <svg viewBox="0 0 24 24" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                         </button>
                       </div>
@@ -1077,179 +980,19 @@ export default function Home() {
             </div>
           )}
 
-          {/* Publish */}
           {tab === "publish" && (
-            <div>
-              <h1 className="page-title">Публикация</h1>
-              <div className="publish-section">
-                <div className="publish-section-title">Выберите пост</div>
-                <select className="select" value={publishPost} onChange={e => setPublishPost(e.target.value)}>
-                  <option value="">-- Выберите пост --</option>
-                  {posts.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
-                </select>
-              </div>
-              <div className="publish-section">
-                <div className="publish-section-title">Выберите группы</div>
-                <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:12,alignItems:"center"}}>
-                  {(() => {
-                    const fi = getFilteredIndices();
-                    const allChecked = fi.length > 0 && fi.every(i => publishGroups.has(i));
-                    return <label className="checkbox-item" style={{display:"inline-flex",width:"auto"}}>
-                      <input type="checkbox" checked={allChecked} onChange={e => toggleAllPubGroups(e.target.checked)}/><span>Выбрать все</span>
-                    </label>;
-                  })()}
-                  {(() => {
-                    const fi = new Set(getFilteredIndices());
-                    const cats = Array.from(new Set(groups.map(g => g.category)));
-                    return cats.length > 1 ? cats.map(cat => {
-                      const catIndices = groups.map((g, i) => g.category === cat ? i : -1).filter(i => i >= 0 && fi.has(i));
-                      if (catIndices.length === 0) return null;
-                      const allSelected = catIndices.every(i => publishGroups.has(i));
-                      return (
-                        <label key={cat} className="checkbox-item" style={{display:"inline-flex",width:"auto"}}>
-                          <input type="checkbox" checked={allSelected} onChange={() => {
-                            setPublishGroups(prev => {
-                              const next = new Set(prev);
-                              if (allSelected) catIndices.forEach(i => next.delete(i));
-                              else catIndices.forEach(i => next.add(i));
-                              return next;
-                            });
-                          }}/><span>{cat} ({catIndices.length})</span>
-                        </label>
-                      );
-                    }) : null;
-                  })()}
-                  {publishPost && (
-                    <select className="input" value={publishFilter} onChange={e => { setPublishFilter(e.target.value as "all" | "new" | "sent"); setPublishGroups(new Set()); }} style={{width:"auto",fontSize:13,padding:"4px 8px",marginLeft:"auto"}}>
-                      <option value="all">Все группы</option>
-                      <option value="new">Не отправлялось ({groups.filter(g => !postedGroupUrls.has(g.url)).length})</option>
-                      <option value="sent">Уже отправлено ({groups.filter(g => postedGroupUrls.has(g.url)).length})</option>
-                    </select>
-                  )}
-                </div>
-                {groups.length===0 ? <p style={{color:"var(--text-muted)",fontSize:14}}>Нет групп</p> :
-                  (() => {
-                    const filtered = groups.map((g, i) => ({...g, idx: i})).filter(g => {
-                      if (publishFilter === "new") return !postedGroupUrls.has(g.url);
-                      if (publishFilter === "sent") return postedGroupUrls.has(g.url);
-                      return true;
-                    });
-                    const cats = Array.from(new Set(filtered.map(g => g.category)));
-                    return cats.length === 0 ? <p style={{color:"var(--text-muted)",fontSize:14}}>Нет групп по фильтру</p> : cats.map(cat => {
-                      const catGroups = filtered.filter(g => g.category === cat);
-                      const expanded = expandedPubCats.has(cat);
-                      const selectedCount = catGroups.filter(g => publishGroups.has(g.idx)).length;
-                      return (
-                        <div key={cat} style={{marginBottom:12}}>
-                          <button type="button" onClick={() => setExpandedPubCats(prev => { const n = new Set(prev); if (n.has(cat)) n.delete(cat); else n.add(cat); return n; })} style={{display:"flex",alignItems:"center",gap:6,width:"100%",background:"transparent",border:"none",padding:"6px 0",cursor:"pointer",color:"var(--text-muted)",fontSize:13,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.5px",textAlign:"left"}}>
-                            <svg viewBox="0 0 24 24" width="14" height="14" style={{transform:expanded?"rotate(90deg)":"rotate(0)",transition:"transform 0.15s",flexShrink:0}}><polyline points="9 18 15 12 9 6" fill="none" stroke="currentColor" strokeWidth="2"/></svg>
-                            <span>{cat}</span>
-                            <span style={{opacity:0.7,fontWeight:500,textTransform:"none",letterSpacing:0}}>({selectedCount > 0 ? `${selectedCount}/${catGroups.length}` : catGroups.length})</span>
-                          </button>
-                          {expanded && (
-                            <div className="checkbox-grid">
-                              {catGroups.map(g => <label key={g.idx} className="checkbox-item"><input type="checkbox" checked={publishGroups.has(g.idx)} onChange={() => togglePubGroup(g.idx)}/><span>{g.name}</span><a href={g.url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{color:"var(--text-muted)",opacity:0.5,marginLeft:2,lineHeight:1}} title="Открыть в VK"><svg viewBox="0 0 24 24" width="11" height="11"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" fill="none" stroke="currentColor" strokeWidth="2"/><polyline points="15 3 21 3 21 9" fill="none" stroke="currentColor" strokeWidth="2"/><line x1="10" y1="14" x2="21" y2="3" stroke="currentColor" strokeWidth="2"/></svg></a></label>)}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    });
-                  })()
-                }
-              </div>
-              <div style={{marginBottom:24,display:"flex",gap:8}}>
-                <button className="btn btn-primary" disabled={publishing} onClick={startPublish}>
-                  {publishing ? <><span className="spinner"/> Публикация...</> : <><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Опубликовать</>}
-                </button>
-                {publishing && <button className="btn btn-danger" onClick={cancelPublish}>Отменить</button>}
-              </div>
-              {showProgress && <div className="progress-section active">
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-                  <span className="progress-text">{publishProgress.status}</span><span className="progress-percent">{publishProgress.progress}%</span>
-                </div>
-                <div className="progress-bar-track"><div className="progress-bar-fill" style={{width:`${publishProgress.progress}%`}}/></div>
-              </div>}
-              {showResults && <div className="results-section active">
-                <div className="publish-section-title">Результаты</div>
-                <div className="results-summary">
-                  <div className="result-badge success">Успешно: {publishProgress.success}</div>
-                  <div className="result-badge failed">Ошибки: {publishProgress.failed}</div>
-                </div>
-                {publishProgress.errors.length>0 && <div className="error-list">
-                  {publishProgress.errors.map((e,i) => <div key={i} className="error-card"><div className="error-card-group">{e.url ? <a href={e.url} target="_blank" rel="noopener noreferrer" style={{color:"inherit"}}>{e.group} ↗</a> : e.group}</div><div className="error-card-msg">{e.error}</div>{e.url && isNotSubscribedPublishError(e.error) && <div style={{marginTop:8}}><a className="btn btn-secondary btn-sm" href={e.url} target="_blank" rel="noopener noreferrer">Подписаться</a></div>}</div>)}
-                  <button className="btn btn-danger" style={{marginTop:"12px"}} onClick={() => {
-                    const failedUrls = publishProgress.errors.map(e => e.url).filter(Boolean) as string[];
-                    if (failedUrls.length === 0) return;
-                    openConfirmDialog("Удалить и заблокировать проблемные группы?", `${failedUrls.length} групп будут удалены и добавлены в чёрный список, чтобы не добавлять их повторно.`, async () => {
-                      try {
-                        await apiFetch("/api/groups/bulk", { method: "DELETE", body: JSON.stringify({ urls: failedUrls }) });
-                        await apiFetch("/api/blacklist", { method: "POST", body: JSON.stringify({ urls: failedUrls, reason: "Публикация невозможна" }) });
-                        toast(`Удалено и заблокировано ${failedUrls.length} групп`, "success");
-                        setPublishProgress(prev => ({ ...prev, errors: [], failed: 0 }));
-                        loadGroups();
-                      } catch { toast("Ошибка при удалении", "error"); }
-                    });
-                  }}>Удалить и заблокировать ({publishProgress.errors.length})</button>
-                </div>}
-              </div>}
-
-            </div>
+            <PublishPanel posts={posts} groups={groups} selected={publishGroups} setSelected={setPublishGroups}
+              postName={publishPost} onSelectPost={setPublishPost} posted={postedGroups?.postName === publishPost ? postedGroups.urls : null}
+              busy={publishing} progress={publishProgress} onStart={() => startPublish()} onCancel={cancelPublish}
+              onHistory={() => setTab("history")} onAddGroup={() => setShowAddGroup(true)} />
           )}
 
-          {/* History */}
           {tab === "history" && (
-            <div>
-              <div className="toolbar">
-                <h1 className="page-title" style={{marginBottom:0}}>История публикаций</h1>
-                <div className="toolbar-spacer"/>
-                <button className="btn btn-sm btn-secondary" onClick={loadHistory}><svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Обновить</button>
-              </div>
-              {history.length === 0 ? (
-                <div className="empty-state"><p>Нет истории публикаций</p></div>
-              ) : (
-                <div style={{display:"flex",flexDirection:"column",gap:12}}>
-                  {history.map(batch => {
-                    const expanded = historyExpanded.has(batch.batchId);
-                    const date = new Date(batch.createdAt);
-                    return (
-                      <div key={batch.batchId} style={{background:"var(--card-bg)",border:"1px solid var(--border)",borderRadius:12,overflow:"hidden"}}>
-                        <div style={{padding:"14px 18px",cursor:"pointer",display:"flex",alignItems:"center",gap:12}} onClick={() => setHistoryExpanded(prev => { const n = new Set(prev); if (n.has(batch.batchId)) n.delete(batch.batchId); else n.add(batch.batchId); return n; })}>
-                          <svg viewBox="0 0 24 24" width="16" height="16" style={{transform:expanded?"rotate(90deg)":"rotate(0)",transition:"transform 0.2s",flexShrink:0,color:"var(--text-muted)"}}><polyline points="9 18 15 12 9 6"/></svg>
-                          <div style={{flex:1,minWidth:0}}>
-                            <div style={{fontWeight:600,fontSize:15}}>{batch.postName}</div>
-                            <div style={{fontSize:12,color:"var(--text-muted)",marginTop:2}}>
-                              {date.toLocaleString("ru-RU")} &middot; {batch.totalGroups} групп
-                            </div>
-                          </div>
-                          <div style={{display:"flex",gap:8,flexShrink:0}}>
-                            <span className="result-badge success" style={{fontSize:12}}>{batch.successCount}</span>
-                            {batch.failedCount > 0 && <span className="result-badge failed" style={{fontSize:12}}>{batch.failedCount}</span>}
-                          </div>
-                        </div>
-                        {expanded && (
-                          <div style={{borderTop:"1px solid var(--border)",padding:"12px 18px"}}>
-                            {batch.postText && (
-                              <div style={{padding:"10px 14px",background:"var(--bg)",borderRadius:8,marginBottom:12,fontSize:13,color:"var(--text-muted)",whiteSpace:"pre-wrap",maxHeight:120,overflow:"auto"}}>
-                                {batch.postText}
-                              </div>
-                            )}
-                            <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                              {batch.groups.map((g, i) => (
-                                <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",borderRadius:6,background: g.success ? "rgba(34,197,94,0.06)" : "rgba(239,68,68,0.06)"}}>
-                                  <div style={{width:8,height:8,borderRadius:"50%",background:g.success?"var(--success)":"var(--error)",flexShrink:0}}/>
-                                  <a href={g.groupUrl} target="_blank" rel="noopener noreferrer" style={{flex:1,fontSize:13,fontWeight:500,color:"inherit",textDecoration:"none"}}>{g.groupName || g.groupUrl} <svg viewBox="0 0 24 24" width="11" height="11" style={{opacity:0.4,verticalAlign:"middle"}}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" fill="none" stroke="currentColor" strokeWidth="2"/><polyline points="15 3 21 3 21 9" fill="none" stroke="currentColor" strokeWidth="2"/><line x1="10" y1="14" x2="21" y2="3" stroke="currentColor" strokeWidth="2"/></svg></a>
-                                  {g.error && <span style={{fontSize:11,color:"var(--error)",maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{g.error}</span>}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+            <PublishHistory batches={history} onRefresh={loadHistory} onRetry={batch => openConfirmDialog(
+              "Повторить публикацию?",
+              `Текущая версия поста «${batch.postName}» будет отправлена в доступные группы, для которых предыдущая отправка завершилась ошибкой или была пропущена.`,
+              () => startPublish(batch),
+            )} busy={publishing} loading={historyLoading} error={historyError} />
           )}
 
           {/* Parser */}
@@ -1482,21 +1225,37 @@ export default function Home() {
 }
 
 /* ===== MODAL ===== */
-function Modal({open,onClose,title,children,small}: {open:boolean;onClose:()=>void;title:string;children:React.ReactNode;small?:boolean}) {
-  if (!open) return null;
+function Modal({ open, onClose, title, children, small }: { open: boolean; onClose: () => void; title: string; children: React.ReactNode; small?: boolean }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  useEffect(() => {
+    const element = dialog.current;
+    if (!open || !element) return;
+    element.showModal();
+    return () => element.close();
+  }, [open]);
   return (
-    <div className="modal-backdrop open" onClick={e => {if(e.target===e.currentTarget)onClose();}}>
-      <div className="modal" style={small?{width:400}:undefined}>
-        <div className="modal-header"><div className="modal-title">{title}</div><button className="modal-close" onClick={onClose}><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
-        <div className="modal-body">{children}</div>
+    <dialog ref={dialog} className="modal" aria-labelledby={titleId} style={small ? { width: 400 } : undefined}
+      onClick={event => {
+        if (event.target !== event.currentTarget) return;
+        const bounds = event.currentTarget.getBoundingClientRect();
+        if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) onClose();
+      }}
+      onCancel={event => { event.preventDefault(); onClose(); }}>
+      <div className="modal-header">
+        <h2 className="modal-title" id={titleId}>{title}</h2>
+        <button type="button" className="modal-close" aria-label="Закрыть" onClick={onClose}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
       </div>
-    </div>
+      <div className="modal-body">{open && children}</div>
+    </dialog>
   );
 }
 
 /* ===== FILE DROP ZONE ===== */
 function FileDropZone({files,setFiles,kind="image",label}: {files:File[];setFiles:(f:File[])=>void;kind?:"image"|"video";label?:string}) {
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputId = useId();
   const [dragover,setDragover] = useState(false);
   const accept = kind === "video" ? "video/*" : "image/*";
   const defaultLabel = kind === "video" ? "Видео" : "Изображения";
@@ -1512,13 +1271,13 @@ function FileDropZone({files,setFiles,kind="image",label}: {files:File[];setFile
   };
   return (
     <div className="form-group">
-      <label className="form-label">{label || defaultLabel}</label>
-      <div className={`drop-zone${dragover?" dragover":""}`} onClick={()=>inputRef.current?.click()}
+      <label className="form-label" htmlFor={inputId}>{label || defaultLabel}</label>
+      <label className={`drop-zone${dragover?" dragover":""}`} htmlFor={inputId}
         onDragEnter={e=>{e.preventDefault();setDragover(true);}} onDragOver={e=>{e.preventDefault();setDragover(true);}}
         onDragLeave={e=>{e.preventDefault();setDragover(false);}} onDrop={e=>{e.preventDefault();setDragover(false);handleFiles(e.dataTransfer.files);}}>
-        <input ref={inputRef} type="file" multiple accept={accept} onChange={e=>{ if(e.target.files) handleFiles(e.target.files); e.target.value = ""; }}/>
-        <p>{kind === "video" ? "Перетащите видео или нажмите" : "Перетащите изображения или нажмите"}</p>
-      </div>
+        <input id={inputId} type="file" multiple accept={accept} onChange={e=>{ if(e.target.files) handleFiles(e.target.files); e.target.value = ""; }}/>
+        <span>{kind === "video" ? "Перетащите видео или нажмите" : "Перетащите изображения или нажмите"}</span>
+      </label>
       {files.length>0&&<div className="file-previews">
         {files.map((f,i) => (
           <div key={`${f.name}-${f.lastModified}-${i}`} className="file-preview">
@@ -1526,7 +1285,7 @@ function FileDropZone({files,setFiles,kind="image",label}: {files:File[];setFile
               ? <video src={previewUrls[i]} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
               : /* eslint-disable-next-line @next/next/no-img-element */
                 <img src={previewUrls[i]} alt=""/>}
-            <button className="remove-file" onClick={()=>setFiles(files.filter((_,j)=>j!==i))}>&times;</button>
+            <button type="button" aria-label={`Убрать ${f.name}`} className="remove-file" onClick={()=>setFiles(files.filter((_,j)=>j!==i))}>&times;</button>
             <div style={{position:"absolute",bottom:2,left:2,right:2,fontSize:10,background:"rgba(0,0,0,0.6)",color:"#fff",padding:"1px 4px",borderRadius:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
               {(f.size / (1024 * 1024)).toFixed(1)} MB
             </div>

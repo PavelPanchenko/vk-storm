@@ -1,39 +1,29 @@
 import { db } from "./db";
 import { logs } from "./db/schema";
-import { desc, eq, lt } from "drizzle-orm";
+import { and, desc, eq, lt } from "drizzle-orm";
 
-export async function appendLog(level: string, message: string): Promise<void> {
-  await db.insert(logs).values({ level: level.toUpperCase(), message });
+export async function appendLog(level: string, message: string, userId?: string): Promise<void> {
+  if (!userId) {
+    console.log(`[${level}] ${message}`);
+    return;
+  }
+  await db.insert(logs).values({ userId, level: level.toUpperCase(), message });
 }
 
-export async function readLogs(level?: string): Promise<string[]> {
-  const query = db
-    .select()
+export function readLogs(userId: string, level?: string, limit = 200) {
+  return db
+    .select({ createdAt: logs.createdAt, level: logs.level, message: logs.message })
     .from(logs)
+    .where(and(eq(logs.userId, userId), level && level !== "all" ? eq(logs.level, level.toUpperCase()) : undefined))
     .orderBy(desc(logs.id))
-    .limit(200);
-
-  const rows = level && level !== "all"
-    ? await db
-        .select()
-        .from(logs)
-        .where(eq(logs.level, level.toUpperCase()))
-        .orderBy(desc(logs.id))
-        .limit(200)
-    : await query;
-
-  return rows.reverse().map(
-    (r) =>
-      `${r.createdAt.toISOString().replace("T", " ").substring(0, 19)} - ${r.level} - ${r.message}`,
-  );
+    .limit(limit);
 }
 
-export async function clearLogs(): Promise<void> {
-  await db.delete(logs);
+export async function clearLogs(userId: string): Promise<void> {
+  await db.delete(logs).where(eq(logs.userId, userId));
 }
 
-/** Delete logs older than the given number of days (default 7). */
-export async function cleanupOldLogs(days = 7): Promise<void> {
+export async function cleanupOldLogs(userId: string, days = 7): Promise<void> {
   const cutoff = new Date(Date.now() - days * 86_400_000);
-  await db.delete(logs).where(lt(logs.createdAt, cutoff));
+  await db.delete(logs).where(and(eq(logs.userId, userId), lt(logs.createdAt, cutoff)));
 }

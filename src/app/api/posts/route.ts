@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireSession } from "@/lib/api-auth";
 import { listPosts, createPost, getPost } from "@/lib/posts";
+import { ownsNewAttachments } from "@/lib/media-access";
 import { appendLog } from "@/lib/logger";
 
 const SAFE_NAME_RE = /^[a-zA-Z0-9_\- а-яА-ЯёЁ.,!?()]+$/;
@@ -31,6 +32,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ detail: "Недопустимое имя поста. Используйте буквы, цифры, _ и -" }, { status: 400 });
   }
 
+  if (!await ownsNewAttachments(result.session.user_id, [...imageUrls, ...videoUrls])) {
+    return NextResponse.json({ detail: "Вложения недоступны" }, { status: 400 });
+  }
+
   const existing = await getPost(result.session.user_id, name);
   if (existing) {
     return NextResponse.json({ detail: `Пост '${name}' уже существует` }, { status: 400 });
@@ -38,7 +43,7 @@ export async function POST(request: NextRequest) {
 
   try {
     await createPost(result.session.user_id, name, text, imageUrls, videoUrls);
-    await appendLog("INFO", `Post created: ${name}`);
+    await appendLog("INFO", `Post created: ${name}`, result.session.user_id);
     return NextResponse.json({ status: "ok", name });
   } catch (e) {
     console.error("Post creation error:", e);

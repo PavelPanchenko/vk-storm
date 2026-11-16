@@ -1,4 +1,4 @@
-import { pgTable, text, integer, timestamp, boolean, serial, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, timestamp, boolean, serial, index, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const sessions = pgTable("sessions", {
   id: text("id").primaryKey(),
@@ -44,12 +44,18 @@ export const posts = pgTable(
   }),
 );
 
+export const mediaUploads = pgTable("media_uploads", {
+  url: text("url").primaryKey(),
+  userId: text("user_id").notNull(),
+});
+
 export const logs = pgTable("logs", {
   id: serial("id").primaryKey(),
+  userId: text("user_id"),
   level: text("level").notNull(),
   message: text("message").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [index("logs_user_id_id_idx").on(table.userId, table.id)]);
 
 export const blacklist = pgTable(
   "blacklist",
@@ -66,6 +72,16 @@ export const blacklist = pgTable(
 );
 
 
+export const publishBatches = pgTable("publish_batches", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  retryOf: text("retry_of"),
+  heartbeatAt: timestamp("heartbeat_at").defaultNow().notNull(),
+  completedAt: timestamp("completed_at"),
+}, (table) => [
+  uniqueIndex("publish_batches_retry_unique").on(table.userId, table.retryOf),
+]);
+
 export const publishResults = pgTable("publish_results", {
   id: serial("id").primaryKey(),
   sessionId: text("session_id").notNull(),
@@ -76,6 +92,8 @@ export const publishResults = pgTable("publish_results", {
   groupUrl: text("group_url").notNull(),
   groupName: text("group_name").notNull().default(""),
   success: boolean("success").notNull(),
+  status: text("status"),
+  postUrl: text("post_url"),
   error: text("error"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [index("publish_results_user_batch_idx").on(table.userId, table.batchId)]);

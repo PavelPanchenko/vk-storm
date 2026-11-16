@@ -1,6 +1,6 @@
 import { db } from "./db";
 import { groups, publishResults } from "./db/schema";
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 
 export interface GroupRow {
   id: number;
@@ -14,7 +14,8 @@ export async function readGroupRows(userId: string): Promise<GroupRow[]> {
   const rows = await db
     .select({ id: groups.id, url: groups.url, category: groups.category, photo: groups.photo, membersCount: groups.membersCount })
     .from(groups)
-    .where(eq(groups.userId, userId));
+    .where(eq(groups.userId, userId))
+    .orderBy(asc(groups.id));
   return rows;
 }
 
@@ -52,7 +53,7 @@ export async function getPublishStats(userId: string): Promise<Record<string, { 
   const rows = await db
     .select({
       groupUrl: publishResults.groupUrl,
-      lastPublished: sql<string>`max(${publishResults.createdAt})`.as("last_published"),
+      lastPublished: sql<string>`max(${publishResults.createdAt}) filter (where ${publishResults.success} = true)`.as("last_published"),
       totalPublished: sql<number>`count(*) filter (where ${publishResults.success} = true)`.as("total_published"),
     })
     .from(publishResults)

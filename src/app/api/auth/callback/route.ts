@@ -50,12 +50,9 @@ export async function GET(request: NextRequest) {
   const tokenData = await exchangeCode(code, deviceId, codeVerifier);
 
   if (tokenData.error) {
-    await appendLog("ERROR", `VK ID token exchange error: ${JSON.stringify(tokenData)}`);
+    await appendLog("ERROR", `VK ID token exchange error: ${String(tokenData.error || "invalid_response")}`);
     return NextResponse.redirect(`${base}/?auth_error=${encodeURIComponent(String(tokenData.error_description || tokenData.error))}`);
   }
-
-  // Log full token response for debugging scope issues
-  await appendLog("DEBUG", `VK ID token response: ${JSON.stringify(tokenData)}`);
 
   const accessToken = tokenData.access_token as string;
   if (!accessToken) {
@@ -67,7 +64,7 @@ export async function GET(request: NextRequest) {
 
   const firstName = (userInfo.first_name as string) || "";
   const lastName = (userInfo.last_name as string) || "";
-  await appendLog("INFO", `User logged in via VK ID: ${firstName} ${lastName} (id=${tokenData.user_id})`);
+  await appendLog("INFO", `User logged in via VK ID: ${firstName} ${lastName} (id=${tokenData.user_id})`, String(tokenData.user_id));
 
   const resp = NextResponse.redirect(base);
   resp.cookies.set("session_id", sessionId, {

@@ -43,7 +43,7 @@ export async function POST(request: NextRequest) {
   const tokenData = await tokenResp.json();
 
   if (tokenData.error) {
-    await appendLog("ERROR", `VK ID token exchange error: ${JSON.stringify(tokenData)}`);
+    await appendLog("ERROR", `VK ID token exchange error: ${String(tokenData.error || "invalid_response")}`);
     return NextResponse.json({ error: tokenData.error_description || tokenData.error }, { status: 400 });
   }
 
@@ -59,7 +59,7 @@ export async function POST(request: NextRequest) {
 
   const firstName = (userInfo.first_name as string) || "";
   const lastName = (userInfo.last_name as string) || "";
-  await appendLog("INFO", `User logged in via VK ID OneTap: ${firstName} ${lastName} (id=${tokenData.user_id})`);
+  await appendLog("INFO", `User logged in via VK ID OneTap: ${firstName} ${lastName} (id=${tokenData.user_id})`, String(tokenData.user_id));
 
   const resp = NextResponse.json({ ok: true });
   resp.cookies.set("session_id", sessionId, {

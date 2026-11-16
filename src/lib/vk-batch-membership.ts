@@ -37,12 +37,11 @@ export async function fetchGroupMembershipMap(
     const { data, session: nextSession } = await vkMethod(sessionId, currentSession, "execute", { code });
     currentSession = nextSession;
     if (data.error) {
-      for (const gid of batch) map.set(gid, false);
       continue;
     }
     const items = Array.isArray(data.response) ? data.response : [];
     batch.forEach((gid, j) => {
-      map.set(gid, isMemberValue(items[j]));
+      if (items[j] !== false && items[j] != null) map.set(gid, isMemberValue(items[j]));
     });
   }
 

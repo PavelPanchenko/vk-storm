@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireSession } from "@/lib/api-auth";
 import { getPost, updatePost } from "@/lib/posts";
-import { deleteUpload } from "@/lib/storage";
+import { deleteUnusedAttachments } from "@/lib/media-access";
 
 type Params = { params: Promise<{ name: string; filename: string }> };
 
@@ -32,8 +32,8 @@ export async function DELETE(_request: NextRequest, { params }: Params) {
   if (!storedUrl) {
     return NextResponse.json({ detail: "Изображение не найдено" }, { status: 404 });
   }
-  try { await deleteUpload(storedUrl); } catch {}
   const remaining = post.images.filter((url) => url !== storedUrl);
   await updatePost(result.session.user_id, name, post.text, remaining, post.videos);
+  await deleteUnusedAttachments(result.session.user_id, [storedUrl]);
   return NextResponse.json({ status: "ok" });
 }

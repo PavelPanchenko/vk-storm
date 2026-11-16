@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { canReadAttachment } from "@/lib/media-access";
 import { requireSession } from "@/lib/api-auth";
 import { uploadPublishVideos } from "@/lib/vk-media-upload";
 
@@ -15,6 +16,12 @@ export async function POST(request: NextRequest) {
 
   if (videos.length === 0) {
     return NextResponse.json({ attachments: [], errors: [] });
+  }
+
+  for (const url of videos) {
+    if (!await canReadAttachment(auth.session.user_id, url)) {
+      return NextResponse.json({ detail: "Вложение недоступно" }, { status: 404 });
+    }
   }
 
   const { attachments, errors } = await uploadPublishVideos(

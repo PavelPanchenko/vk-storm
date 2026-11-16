@@ -33,7 +33,7 @@ export async function requireSession(): Promise<
       const tokenData = await refreshTokens(session.refresh_token, session.device_id);
       if (tokenData.error || !tokenData.access_token) {
         await deleteSession(sessionId);
-        await appendLog("WARNING", `Refresh failed: ${JSON.stringify(tokenData)}`);
+        await appendLog("WARNING", `Refresh failed: ${String(tokenData.error || "invalid_response")}`);
         return { error: unauthorized("refresh_failed") };
       }
       await updateSessionTokens(sessionId, tokenData);

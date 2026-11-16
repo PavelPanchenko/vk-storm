@@ -1,6 +1,8 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import sharp from "sharp";
+import { readPrivateBlob } from "./blob-storage";
+import { privateBlobPath } from "./media-upload-config";
 import { resolveUploadPath } from "./storage";
 
 const MAX_UPLOAD_BYTES = 2_500_000;
@@ -15,6 +17,15 @@ const IMAGE_MIME: Record<string, string> = {
 };
 
 export async function loadImageBlob(imageUrl: string): Promise<{ blob: Blob; fileName: string }> {
+  const pathname = privateBlobPath(imageUrl);
+  if (pathname) {
+    const result = await readPrivateBlob(pathname);
+    if (!result) throw new Error("Файл изображения не найден");
+    const blob = await new Response(result.stream, {
+      headers: { "Content-Type": result.blob.contentType },
+    }).blob();
+    return { blob, fileName: basename(pathname) };
+  }
   if (imageUrl.startsWith("/uploads/")) {
     const rel = imageUrl.slice("/uploads/".length);
     const abs = resolveUploadPath(rel);

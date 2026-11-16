@@ -46,7 +46,7 @@ async function refreshSessionShared(sessionId: string, staleToken: string, fallb
 
     const tokenData = await refreshTokens(refreshToken, deviceId);
     if (tokenData.error || !tokenData.access_token) {
-      await appendLog("ERROR", `Token refresh failed: ${JSON.stringify(tokenData)}`);
+      await appendLog("ERROR", `Token refresh failed: ${String(tokenData.error || "invalid_response")}`);
       return null;
     }
     await updateSessionTokens(sessionId, tokenData);
@@ -101,7 +101,7 @@ export async function vkMethod(
       continue;
     }
 
-    if (errCode === 10 || errCode === 6) {
+    if ((errCode === 10 && method !== "wall.post") || errCode === 6) {
       if (transientAttempt >= MAX_TRANSIENT_RETRIES) return { data, session: currentSession };
       await appendLog("WARNING", `VK Error ${errCode} on ${method}, retry ${transientAttempt + 1}/${MAX_TRANSIENT_RETRIES}`);
       await new Promise(r => setTimeout(r, backoffDelay(transientAttempt)));
